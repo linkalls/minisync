@@ -7,6 +7,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
     "drizzle-orm": "^0.41.0",
     "hono": "^4.7.7"
   },

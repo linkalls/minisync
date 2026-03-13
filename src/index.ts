@@ -14,5 +14,6 @@ export * from "./auth";
 export * from "./http";
 export * from "./server";
 export * from "./postgres";
+export * from "./supabase";
 export * from "./errors";
 export * from "./utils";

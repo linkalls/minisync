@@ -20,6 +20,8 @@ Tiny OSS local-first sync engine for SQLite-first apps.
 - Queue / state introspection helpers
 - Drizzle-first helpers with inferred columns
 - Postgres backend scaffold
+- Supabase adapter + SQL function scaffold
+- GitHub Actions CI
 - Bun test coverage
 
 ## Status
@@ -102,6 +104,7 @@ const auth = chainAuth(
 - Put your own auth verifier in `createSyncServer({ auth })`
 - Prefer WAL mode for SQLite-backed deployments
 - Use the Postgres backend scaffold for managed SQL backends
+- Use `SupabaseSyncBackend` + `supabaseSqlSetup()` when you want RPC-based sync on Supabase
 - Treat the included examples as starting points, not final infra
 
 ## Run tests
