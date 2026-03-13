@@ -10,11 +10,12 @@ Drizzle-first local-first sync engine for SQLite apps.
 
 ---
 
-## 3行でいうと
+## いちばん理想の使い方
 
-1. アプリは **Drizzle + local SQLite** に普通に書く
-2. `minisync` が変更を queue に積む
-3. `push` / `pull` でサーバーと同期する
+**既存の Auth.js 入りサーバーに、sync route を1個足すだけ。**
+
+`minisync` は auth の主役にならない。
+既存の session / auth middleware の結果を読んで、sync に渡すだけ。
 
 ---
 
@@ -42,20 +43,6 @@ installSync({
 });
 ```
 
-`syncTable(notes)` はなるべく自動で推論する。
-- `id`
-- `user_id`
-- `deleted_at`
-
-必要なら上書きもできる。
-
-```ts
-syncTable(notes, {
-  deletedAtColumn: "deleted_at",
-  omitColumns: ["search_cache"],
-});
-```
-
 ---
 
 ### 2. クライアントを作る
@@ -63,16 +50,17 @@ syncTable(notes, {
 ```ts
 import { createSyncClient, HttpSyncBackend } from "minisync";
 
-const backend = new HttpSyncBackend({
-  baseUrl: "https://api.example.com/sync",
-  headers: {
-    authorization: `Bearer ${token}`,
-  },
-});
+const session = { user: { id: "u1" } };
+const token = "your-auth-token";
 
 const client = createSyncClient({
   db,
-  backend,
+  backend: new HttpSyncBackend({
+    baseUrl: "https://api.example.com/api/sync",
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  }),
   userId: session.user.id,
   tables: ["notes"],
   intervalMs: 5000,
@@ -84,55 +72,58 @@ await client.syncNow();
 
 ---
 
-### 3. サーバーは Auth.js helper を使う
+### 3. 既存の Auth.js サーバーに route を足す
 
 ```ts
-import { authJsAuth, createSyncServer, SqliteSyncBackend } from "minisync";
+// app/api/sync/[action]/route.ts
+import { auth } from "@/auth";
+import { createSyncRouteHandlers, resolveAuthJsIdentity, SqliteSyncBackend } from "minisync";
 import { Database } from "bun:sqlite";
 
 const db = new Database("sync.db");
 const backend = new SqliteSyncBackend({ db });
 backend.init();
 
-export default createSyncServer({
+export const { POST } = createSyncRouteHandlers({
   backend,
-  auth: authJsAuth({
-    getSession: async (c) => {
-      return await getSessionFromYourApp(c);
-    },
-  }),
+  resolveIdentity: resolveAuthJsIdentity({ auth }),
 });
 ```
 
-これがいまの **おすすめ導線**。
+これが今の **一番おすすめの導線**。
 
 ---
 
 ## Auth.js をどう考えてる？
 
 `minisync` は Auth.js の独自流儀を作らない。
-やることはシンプルで、**Auth.js が解決した session から `userId` を受け取るだけ**。
 
-つまり:
-- Auth.js の session / middleware / callback の流れはそのまま
-- `minisync` は sync 用の接続点だけ提供
-- 独自の auth wrapper を押しつけない
+やることはこれだけ:
+- 既存の `auth()` や session resolver を呼ぶ
+- `userId` を取り出す
+- sync request に流す
 
-### 推奨
+つまり、**Auth.js 既存サーバーに後付けしやすい** ことを重視してる。
+
+### 推奨 helper
 
 ```ts
-import { authJsAuth } from "minisync";
+import { resolveAuthJsIdentity } from "minisync";
 
-const auth = authJsAuth({
-  getSession: async (c) => {
-    return await getSessionFromYourApp(c);
-  },
-});
+const resolveIdentity = resolveAuthJsIdentity({ auth });
 ```
 
 ---
 
 ## ほかの auth も使える
+
+### Auth.js helper
+
+```ts
+import { resolveAuthJsIdentity } from "minisync";
+
+const resolveIdentity = resolveAuthJsIdentity({ auth });
+```
 
 ### Clerk
 
@@ -171,6 +162,24 @@ const auth = chainAuth(
   jwtClaimsAuth(),
 );
 ```
+
+---
+
+## route handler 方式と server helper 方式
+
+### 1. route handler に埋め込む（おすすめ）
+既存のサーバーに足しやすい。
+
+- `createSyncRouteHandlers(...)`
+- `handleSyncRequest(...)`
+- `resolveAuthJsIdentity(...)`
+
+### 2. Hono helper を使う
+新規に sync サーバーを切りたいとき向け。
+
+- `createSyncServer(...)`
+
+でも基本は **埋め込み型 route handler** をおすすめする。
 
 ---
 
@@ -231,7 +240,8 @@ installSync({
 - push / pull
 - partial ack
 - retry / dead-letter
-- auth-aware server
+- embedded route handlers
+- auth-aware server helper
 - Auth.js / Clerk / JWT / custom auth adapters
 - SQLite / Postgres / Supabase backend entrypoints
 - Hono server helper
@@ -252,7 +262,8 @@ installSync({
 ## examples
 
 - `examples/client.ts` → Drizzle client example
-- `examples/http-server.ts` → Auth.js helper 推奨 server example
+- `examples/http-server.ts` → standalone server helper example
+- `examples/next-authjs-route.ts` → 既存 Auth.js サーバーに route を足す例
 - `examples/supabase.ts` → Supabase backend example
 
 ---
