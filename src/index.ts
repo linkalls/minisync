@@ -4,3 +4,6 @@ export * from "./conflict";
 export * from "./sql";
 export * from "./client";
 export * from "./memory-backend";
+export * from "./sqlite-backend";
+export * from "./setup";
+export * from "./introspection";

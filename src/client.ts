@@ -1,4 +1,5 @@
 import { nextHlc } from "./hlc";
+import { resolveLww } from "./conflict";
 import type { SyncChange, SyncClientOptions, SyncRow } from "./types";
 
 interface QueueRow {
@@ -13,6 +14,14 @@ interface QueueRow {
 
 export class SyncClient {
   constructor(private readonly options: SyncClientOptions) {}
+
+  start() {
+    this.init();
+  }
+
+  stop() {
+    // no-op for MVP
+  }
 
   init() {
     this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('checkpoint', '')");
@@ -66,6 +75,46 @@ export class SyncClient {
     return response.accepted;
   }
 
+  private applyRemoteChange(change: SyncChange) {
+    const currentHlc = this.options.db
+      .query("SELECT value FROM _sync_state WHERE key = ?1")
+      .get(`row_hlc:${change.table}:${change.row.id}`) as { value: string } | null;
+
+    if (currentHlc) {
+      const localDeleted = this.options.db
+        .query("SELECT value FROM _sync_state WHERE key = ?1")
+        .get(`row_deleted:${change.table}:${change.row.id}`) as { value: string } | null;
+      const localRow: SyncRow = {
+        id: change.row.id,
+        userId: change.row.userId,
+        data: {},
+        hlc: currentHlc.value,
+        deleted: localDeleted?.value === "1",
+      };
+      const winner = resolveLww(localRow, change.row);
+      if (winner.hlc !== change.row.hlc) return;
+    }
+
+    const columns = Object.keys(change.row.data);
+    if (!change.row.deleted && columns.length > 0) {
+      const placeholders = columns.map(() => "?").join(", ");
+      const values = columns.map((column) => change.row.data[column]);
+      const updateAssignments = columns.map((column) => `${column} = excluded.${column}`).join(", ");
+      this.options.db
+        .query(
+          `INSERT INTO ${change.table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateAssignments}`,
+        )
+        .run(...values);
+    }
+
+    if (change.row.deleted) {
+      this.options.db.query(`DELETE FROM ${change.table} WHERE id = ?1`).run(change.row.id);
+    }
+
+    this.setState(`row_hlc:${change.table}:${change.row.id}`, change.row.hlc);
+    this.setState(`row_deleted:${change.table}:${change.row.id}`, change.row.deleted ? "1" : "0");
+  }
+
   async pull(): Promise<number> {
     const checkpoint = this.getState("checkpoint") || undefined;
     const response = await this.options.backend.pullChanges({
@@ -73,6 +122,9 @@ export class SyncClient {
       checkpoint,
       tables: this.options.tables,
     });
+    for (const change of response.changes) {
+      this.applyRemoteChange(change);
+    }
     this.setState("checkpoint", response.checkpoint);
     return response.changes.length;
   }
