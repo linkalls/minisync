@@ -1,15 +1,15 @@
-import { metadataSql, triggerSql, type TriggerSqlOptions } from "./sql";
+import type { TriggerSqlOptions } from "./sql";
+import { installSync, syncTable, type SyncTableConfig } from "./schema";
 
 export interface SetupTable extends TriggerSqlOptions {
   name: string;
   columns: string[];
+  omitColumns?: string[];
 }
 
 export function setupSync(db: Database, tables: SetupTable[]) {
-  for (const sql of metadataSql()) db.exec(sql);
-  for (const table of tables) {
-    for (const sql of triggerSql(table.name, table.columns, table)) {
-      db.exec(sql);
-    }
-  }
+  installSync({
+    db,
+    tables: tables.map((table) => syncTable(table.name, table as SyncTableConfig)),
+  });
 }

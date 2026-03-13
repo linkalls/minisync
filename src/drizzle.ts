@@ -1,18 +1,18 @@
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
-import type { SetupTable } from "./setup";
+import { syncTable, type SyncTableConfig } from "./schema";
 
-export interface DrizzleSyncTable extends SetupTable {
-  drizzle?: SQLiteTable;
+export type DrizzleSyncTable = SyncTableConfig & { drizzle?: SQLiteTable };
+
+export function defineSyncTable(name: string, columns: string[]): SyncTableConfig {
+  return syncTable(name, { columns });
 }
 
-export function defineSyncTable(name: string, columns: string[]): SetupTable {
-  return { name, columns };
-}
-
-export function defineDrizzleSyncTable(table: SQLiteTable, columns: string[]): DrizzleSyncTable {
+export function defineDrizzleSyncTable(
+  table: SQLiteTable,
+  options: Omit<SyncTableConfig, "name" | "columns"> & { columns?: string[] } = {},
+): DrizzleSyncTable {
   return {
-    name: table[Symbol.for("drizzle:Name")] as string,
-    columns,
+    ...syncTable(table, options),
     drizzle: table,
   };
 }

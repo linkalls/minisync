@@ -3,68 +3,77 @@
 Tiny OSS local-first sync engine for SQLite-first apps.
 
 ## What it includes
-- Local SQLite metadata tables
+- High-level schema install API: `installSync()` + `syncTable()`
 - Trigger generation for `INSERT / UPDATE / DELETE`
-- Optional soft-delete trigger support via `deleted_at`
+- Optional soft-delete support via `deleted_at`
 - HLC timestamps
 - LWW conflict resolution
 - Push / pull client orchestration via backend adapters
 - Queue lock / retry state for failed pushes
 - Event hooks: `onSyncStart`, `onSyncSuccess`, `onConflict`, `onError`
-- Local SQLite-backed backend for self-contained testing/dev
+- SQLite backend for local/dev and integration testing
+- HTTP backend adapter + Hono server helper
 - Queue / state introspection helpers
-- Drizzle helper for sync table definitions
+- Drizzle-first helpers with inferred columns
 - Bun test coverage
 
 ## Status
-Usable prototype / MVP. Still missing a production-grade HTTP backend adapter and migration story.
+Usable prototype / MVP. Still not fully production-ready, but now much closer to a real app integration shape.
 
-## Quick example
+## Better setup API
 ```ts
 import { Database } from "bun:sqlite";
-import { SqliteSyncBackend, createSyncClient, setupSync } from "minisync";
+import { installSync, syncTable } from "minisync";
+import { sqliteTable, text } from "drizzle-orm/sqlite-core";
 
-const db = new Database(":memory:");
-db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, deleted_at TEXT)");
-setupSync(db, [
-  {
-    name: "notes",
-    columns: ["id", "user_id", "title", "deleted_at"],
-    deletedAtColumn: "deleted_at",
+const db = new Database("app.db");
+
+const notes = sqliteTable("notes", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  title: text("title").notNull(),
+  deletedAt: text("deleted_at"),
+});
+
+installSync({
+  db,
+  tables: [syncTable(notes)],
+});
+```
+
+## Client example
+```ts
+import { createSyncClient, HttpSyncBackend } from "minisync";
+
+const backend = new HttpSyncBackend({
+  baseUrl: "https://api.example.com/sync",
+  headers: {
+    authorization: `Bearer ${token}`,
   },
-]);
-
-const backendDb = new Database(":memory:");
-const backend = new SqliteSyncBackend({ db: backendDb });
-backend.init();
+});
 
 const client = createSyncClient({
   db,
   backend,
   userId: "u1",
   tables: ["notes"],
-  intervalMs: 5_000,
-  onSyncSuccess(event) {
-    console.log("synced", event);
-  },
+  intervalMs: 5000,
 });
 
 client.start();
 await client.syncNow();
 ```
 
-## Drizzle helper
+## Server example
 ```ts
-import { sqliteTable, text } from "drizzle-orm/sqlite-core";
-import { defineDrizzleSyncTable, setupSync } from "minisync";
+import { createSyncServer, SqliteSyncBackend } from "minisync";
+import { Database } from "bun:sqlite";
 
-const notes = sqliteTable("notes", {
-  id: text("id").primaryKey(),
-  userId: text("user_id").notNull(),
-  title: text("title").notNull(),
-});
+const db = new Database("sync.db");
+const backend = new SqliteSyncBackend({ db });
+backend.init();
 
-setupSync(db, [defineDrizzleSyncTable(notes, ["id", "user_id", "title"])]);
+export default createSyncServer({ backend });
 ```
 
 ## Run tests
