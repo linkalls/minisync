@@ -10,6 +10,7 @@ export * from "./schema";
 export * from "./introspection";
 export * from "./drizzle";
 export * from "./events";
+export * from "./auth";
 export * from "./http";
 export * from "./server";
 export * from "./postgres";

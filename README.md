@@ -16,6 +16,7 @@ Tiny OSS local-first sync engine for SQLite-first apps.
 - SQLite backend for local/dev and integration testing
 - HTTP backend adapter + Hono server helper
 - Auth-aware sync server helper
+- Pluggable auth adapters for Clerk / Auth.js / JWT / custom auth
 - Queue / state introspection helpers
 - Drizzle-first helpers with inferred columns
 - Postgres backend scaffold
@@ -70,7 +71,7 @@ await client.syncNow();
 
 ## Server example
 ```ts
-import { createSyncServer, SqliteSyncBackend } from "minisync";
+import { clerkAuth, createSyncServer, SqliteSyncBackend } from "minisync";
 import { Database } from "bun:sqlite";
 
 const db = new Database("sync.db");
@@ -79,12 +80,22 @@ backend.init();
 
 export default createSyncServer({
   backend,
-  auth: async (c) => {
-    const token = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
-    if (!token) return null;
-    return { userId: token };
-  },
+  auth: clerkAuth(),
 });
+```
+
+## Supported auth styles
+```ts
+import { authJsAuth, bearerTokenAuth, chainAuth, clerkAuth, jwtClaimsAuth } from "minisync";
+
+const auth = chainAuth(
+  authJsAuth({ getSession: async (c) => getSessionFromSomewhere(c) }),
+  clerkAuth(),
+  jwtClaimsAuth(),
+  bearerTokenAuth({
+    resolve: async (token) => ({ userId: token }),
+  }),
+);
 ```
 
 ## Production notes

@@ -1,15 +1,11 @@
 import { Hono } from "hono";
-import type { Context } from "hono";
 import { AuthError } from "./errors";
+import type { AuthAdapter } from "./auth";
 import type { PullRequest, PushRequest, SyncBackend } from "./types";
-
-export interface AuthResult {
-  userId: string;
-}
 
 export interface CreateSyncServerOptions {
   backend: SyncBackend;
-  auth?: (context: Context) => Promise<AuthResult | null> | AuthResult | null;
+  auth?: AuthAdapter;
 }
 
 export function createSyncServer(options: CreateSyncServerOptions) {
