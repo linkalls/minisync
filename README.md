@@ -1,116 +1,26 @@
 # minisync
 
-SQLite-first local-first sync engine.
+Drizzle-first local-first sync engine for SQLite apps.
 
 `minisync` is for apps that:
 - write to local SQLite first
 - work offline
 - sync later with your server
-- want simple auth/backends instead of a locked-in hosted sync product
+- want OSS sync infra instead of a hosted lock-in product
 
 ---
 
 ## 3行でいうと
 
-1. アプリは **ローカル SQLite** に普通に書く
+1. アプリは **Drizzle + local SQLite** に普通に書く
 2. `minisync` が変更を queue に積む
 3. `push` / `pull` でサーバーと同期する
 
 ---
 
-## まず一番かんたんな流れ
+## 最短のおすすめ構成
 
-### 1. ローカルDBを同期対応にする
-
-```ts
-import { Database } from "bun:sqlite";
-import { installSync, syncTable } from "minisync";
-
-const db = new Database("app.db");
-
-db.exec(`
-  create table if not exists notes (
-    id text primary key,
-    user_id text not null,
-    title text not null,
-    deleted_at text
-  )
-`);
-
-installSync({
-  db,
-  tables: [
-    syncTable("notes", {
-      columns: ["id", "user_id", "title", "deleted_at"],
-      deletedAtColumn: "deleted_at",
-    }),
-  ],
-});
-```
-
-これで `notes` の INSERT / UPDATE / DELETE 相当が `_sync_queue` に積まれる。
-
----
-
-### 2. クライアントを作る
-
-```ts
-import { createSyncClient, HttpSyncBackend } from "minisync";
-
-const backend = new HttpSyncBackend({
-  baseUrl: "https://api.example.com/sync",
-  headers: {
-    authorization: `Bearer ${token}`,
-  },
-});
-
-const client = createSyncClient({
-  db,
-  backend,
-  userId: "u1",
-  tables: ["notes"],
-  intervalMs: 5000,
-});
-
-client.start();
-await client.syncNow();
-```
-
-これで:
-- local changes を `push`
-- remote changes を `pull`
-- 5秒ごとに自動同期
-
-が動く。
-
----
-
-### 3. サーバーを作る
-
-```ts
-import { Database } from "bun:sqlite";
-import { bearerTokenAuth, createSyncServer, SqliteSyncBackend } from "minisync";
-
-const db = new Database("sync.db");
-const backend = new SqliteSyncBackend({ db });
-backend.init();
-
-export default createSyncServer({
-  backend,
-  auth: bearerTokenAuth({
-    resolve: async (token) => ({ userId: token }),
-  }),
-});
-```
-
-この例では `Authorization: Bearer u1` が来たら `userId = "u1"` として扱う。
-実運用ではここを Clerk / Auth.js / JWT 検証に差し替える。
-
----
-
-## Drizzle を使う場合
-
-文字列で列名を二重管理したくないならこっち。
+### 1. Drizzle テーブルを同期対象にする
 
 ```ts
 import { Database } from "bun:sqlite";
@@ -132,7 +42,7 @@ installSync({
 });
 ```
 
-`syncTable(notes)` はできるだけ自動で推論する:
+`syncTable(notes)` はなるべく自動で推論する。
 - `id`
 - `user_id`
 - `deleted_at`
@@ -148,45 +58,105 @@ syncTable(notes, {
 
 ---
 
-## auth はどう書く？
-
-`createSyncServer({ auth })` に **userId を返す関数** を渡すだけ。
-
-### Clerk
+### 2. クライアントを作る
 
 ```ts
-import { clerkAuth, createSyncServer } from "minisync";
+import { createSyncClient, HttpSyncBackend } from "minisync";
 
-createSyncServer({
-  backend,
-  auth: clerkAuth(),
+const backend = new HttpSyncBackend({
+  baseUrl: "https://api.example.com/sync",
+  headers: {
+    authorization: `Bearer ${token}`,
+  },
 });
+
+const client = createSyncClient({
+  db,
+  backend,
+  userId: session.user.id,
+  tables: ["notes"],
+  intervalMs: 5000,
+});
+
+client.start();
+await client.syncNow();
 ```
 
-### Auth.js
+---
+
+### 3. サーバーは Auth.js helper を使う
 
 ```ts
-import { authJsAuth, createSyncServer } from "minisync";
+import { authJsAuth, createSyncServer, SqliteSyncBackend } from "minisync";
+import { Database } from "bun:sqlite";
 
-createSyncServer({
+const db = new Database("sync.db");
+const backend = new SqliteSyncBackend({ db });
+backend.init();
+
+export default createSyncServer({
   backend,
   auth: authJsAuth({
     getSession: async (c) => {
-      const session = await getSessionFromYourApp(c);
-      return session;
+      return await getSessionFromYourApp(c);
     },
   }),
 });
 ```
 
+これがいまの **おすすめ導線**。
+
+---
+
+## Auth.js をどう考えてる？
+
+`minisync` は Auth.js の独自流儀を作らない。
+やることはシンプルで、**Auth.js が解決した session から `userId` を受け取るだけ**。
+
+つまり:
+- Auth.js の session / middleware / callback の流れはそのまま
+- `minisync` は sync 用の接続点だけ提供
+- 独自の auth wrapper を押しつけない
+
+### 推奨
+
+```ts
+import { authJsAuth } from "minisync";
+
+const auth = authJsAuth({
+  getSession: async (c) => {
+    return await getSessionFromYourApp(c);
+  },
+});
+```
+
+---
+
+## ほかの auth も使える
+
+### Clerk
+
+```ts
+import { clerkAuth } from "minisync";
+
+const auth = clerkAuth();
+```
+
 ### JWT
 
 ```ts
-import { jwtClaimsAuth, createSyncServer } from "minisync";
+import { jwtClaimsAuth } from "minisync";
 
-createSyncServer({
-  backend,
-  auth: jwtClaimsAuth(),
+const auth = jwtClaimsAuth();
+```
+
+### custom
+
+```ts
+import { bearerTokenAuth } from "minisync";
+
+const auth = bearerTokenAuth({
+  resolve: async (token) => ({ userId: token }),
 });
 ```
 
@@ -206,39 +176,52 @@ const auth = chainAuth(
 
 ## backend は何がある？
 
-### 1. `SqliteSyncBackend`
-小さく始めたいとき用。
-ローカル検証・dev・単純な self-host に向いてる。
+### `SqliteSyncBackend`
+- 一番軽い
+- ローカル検証 / dev / 小さめ self-host 向け
 
-### 2. `PostgresSyncBackend`
-汎用 Postgres 用の scaffold。
-自前サーバーで SQL executor を差し込む想定。
+### `PostgresSyncBackend`
+- 汎用 Postgres scaffold
+- 自前サーバーで SQL executor を差し込む形
 
-### 3. `SupabaseSyncBackend`
-Supabase の RPC で動かしたいとき用。
+### `SupabaseSyncBackend`
+- Supabase RPC ベース
+- `supabaseSqlSetup()` で SQL scaffold を出せる
 
 ```ts
 import { createClient } from "@supabase/supabase-js";
-import { SupabaseSyncBackend } from "minisync";
+import { SupabaseSyncBackend, supabaseSqlSetup } from "minisync";
 
 const supabase = createClient(url, anonKey);
 const backend = new SupabaseSyncBackend({ client: supabase });
-```
-
-Supabase 側には SQL 関数が必要。
-
-```ts
-import { supabaseSqlSetup } from "minisync";
-
 const sql = supabaseSqlSetup();
 ```
 
-この SQL を Supabase に流して、`minisync_pull` / `minisync_push` を作る。
+---
+
+## Drizzle を使わない場合
+
+raw SQL でも使える。
+ただ、これは **fallback** 扱い。
+基本は Drizzle をおすすめする。
+
+```ts
+installSync({
+  db,
+  tables: [
+    syncTable("notes", {
+      columns: ["id", "user_id", "title", "deleted_at"],
+      deletedAtColumn: "deleted_at",
+    }),
+  ],
+});
+```
 
 ---
 
 ## いま入ってる機能
 
+- Drizzle-first setup API
 - local SQLite を主にする同期モデル
 - trigger ベース変更追跡
 - `_sync_queue`, `_sync_state`
@@ -249,15 +232,14 @@ const sql = supabaseSqlSetup();
 - partial ack
 - retry / dead-letter
 - auth-aware server
-- Clerk / Auth.js / JWT / custom auth adapters
+- Auth.js / Clerk / JWT / custom auth adapters
 - SQLite / Postgres / Supabase backend entrypoints
 - Hono server helper
+- GitHub Actions CI
 
 ---
 
 ## まだ注意が必要なところ
-
-まだ完全無欠ではないので、このへんは導入時に見てね。
 
 - 本番 auth の検証ロジック
 - migration 戦略
@@ -269,9 +251,9 @@ const sql = supabaseSqlSetup();
 
 ## examples
 
-- `examples/client.ts`
-- `examples/http-server.ts`
-- `examples/supabase.ts`
+- `examples/client.ts` → Drizzle client example
+- `examples/http-server.ts` → Auth.js helper 推奨 server example
+- `examples/supabase.ts` → Supabase backend example
 
 ---
 
@@ -281,5 +263,3 @@ const sql = supabaseSqlSetup();
 bun install
 bun test
 ```
-
-GitHub Actions でも `bun test` を回してる。

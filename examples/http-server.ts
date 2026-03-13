@@ -1,5 +1,12 @@
 import { Database } from "bun:sqlite";
-import { createSyncServer, SqliteSyncBackend, type SyncBackend } from "../src";
+import { authJsAuth, createSyncServer, SqliteSyncBackend, type SyncBackend } from "../src";
+
+async function getSessionFromYourApp(_context: unknown) {
+  return {
+    user: { id: "u1" },
+    orgId: null,
+  };
+}
 
 const db = new Database("sync.db");
 const backend: SyncBackend = new SqliteSyncBackend({ db });
@@ -8,10 +15,7 @@ const backend: SyncBackend = new SqliteSyncBackend({ db });
 
 export default createSyncServer({
   backend,
-  auth: async (c) => {
-    const header = c.req.header("authorization");
-    const userId = header?.replace(/^Bearer\s+/i, "")?.trim();
-    if (!userId) return null;
-    return { userId };
-  },
+  auth: authJsAuth({
+    getSession: async (c) => getSessionFromYourApp(c),
+  }),
 });
