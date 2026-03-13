@@ -1,26 +1,43 @@
 import { nextHlc } from "./hlc";
 import { resolveLww } from "./conflict";
 import type { SyncChange, SyncClientOptions, SyncRow } from "./types";
+import { quoteIdentifier } from "./utils";
 
 interface QueueRow {
   seq: number;
   table_name: string;
   op: "upsert" | "delete";
   row_id: string;
-  user_id: string;
+  user_id: string | null;
   hlc: string;
   payload: string;
+  attempts: number;
+  locked: number;
 }
 
 export class SyncClient {
-  constructor(private readonly options: SyncClientOptions) {}
+  private intervalId: Timer | null = null;
+
+  constructor(private readonly options: SyncClientOptions) {
+    if (options.autoStart) {
+      this.start();
+    }
+  }
 
   start() {
     this.init();
+    if (this.options.intervalMs && !this.intervalId) {
+      this.intervalId = setInterval(() => {
+        void this.syncNow().catch((error) => this.emitError(error));
+      }, this.options.intervalMs);
+    }
   }
 
   stop() {
-    // no-op for MVP
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
   }
 
   init() {
@@ -28,10 +45,12 @@ export class SyncClient {
     this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('last_hlc', '')");
   }
 
+  private emitError(error: unknown) {
+    this.options.onError?.({ error });
+  }
+
   private getState(key: string): string {
-    const row = this.options.db
-      .query("SELECT value FROM _sync_state WHERE key = ?1")
-      .get(key) as { value: string } | null;
+    const row = this.options.db.query("SELECT value FROM _sync_state WHERE key = ?1").get(key) as { value: string } | null;
     return row?.value ?? "";
   }
 
@@ -44,8 +63,31 @@ export class SyncClient {
   private readQueuedChanges(): QueueRow[] {
     const placeholders = this.options.tables.map(() => "?").join(", ");
     return this.options.db
-      .query(`SELECT seq, table_name, op, row_id, user_id, hlc, payload FROM _sync_queue WHERE table_name IN (${placeholders}) ORDER BY seq ASC`)
+      .query(
+        `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked FROM _sync_queue WHERE locked = 0 AND table_name IN (${placeholders}) ORDER BY seq ASC`,
+      )
       .all(...this.options.tables) as QueueRow[];
+  }
+
+  private lockQueuedRows(rows: QueueRow[]) {
+    for (const row of rows) {
+      this.options.db.query("UPDATE _sync_queue SET locked = 1 WHERE seq = ?1").run(row.seq);
+    }
+  }
+
+  private acknowledgeQueuedRows(rows: QueueRow[]) {
+    for (const row of rows) {
+      this.options.db.query("DELETE FROM _sync_queue WHERE seq = ?1").run(row.seq);
+    }
+  }
+
+  private failQueuedRows(rows: QueueRow[], error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    for (const row of rows) {
+      this.options.db
+        .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2 WHERE seq = ?1")
+        .run(row.seq, message);
+    }
   }
 
   private mapQueueRow(row: QueueRow): SyncChange {
@@ -66,13 +108,20 @@ export class SyncClient {
   async push(): Promise<number> {
     const queued = this.readQueuedChanges();
     if (queued.length === 0) return 0;
-    const response = await this.options.backend.pushChanges({
-      userId: this.options.userId,
-      changes: queued.map((row) => this.mapQueueRow(row)),
-    });
-    this.options.db.exec("DELETE FROM _sync_queue");
-    this.setState("checkpoint", response.checkpoint);
-    return response.accepted;
+    this.lockQueuedRows(queued);
+    try {
+      const response = await this.options.backend.pushChanges({
+        userId: this.options.userId,
+        changes: queued.map((row) => this.mapQueueRow(row)),
+      });
+      this.acknowledgeQueuedRows(queued);
+      this.setState("checkpoint", response.checkpoint);
+      return response.accepted;
+    } catch (error) {
+      this.failQueuedRows(queued, error);
+      this.emitError(error);
+      throw error;
+    }
   }
 
   private applyRemoteChange(change: SyncChange) {
@@ -92,23 +141,27 @@ export class SyncClient {
         deleted: localDeleted?.value === "1",
       };
       const winner = resolveLww(localRow, change.row);
-      if (winner.hlc !== change.row.hlc) return;
+      if (winner.hlc !== change.row.hlc) {
+        this.options.onConflict?.({ change });
+        return;
+      }
     }
 
     const columns = Object.keys(change.row.data);
     if (!change.row.deleted && columns.length > 0) {
       const placeholders = columns.map(() => "?").join(", ");
+      const quotedColumns = columns.map(quoteIdentifier);
       const values = columns.map((column) => change.row.data[column]);
-      const updateAssignments = columns.map((column) => `${column} = excluded.${column}`).join(", ");
+      const updateAssignments = quotedColumns.map((column) => `${column} = excluded.${column}`).join(", ");
       this.options.db
         .query(
-          `INSERT INTO ${change.table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateAssignments}`,
+          `INSERT INTO ${quoteIdentifier(change.table)} (${quotedColumns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateAssignments}`,
         )
         .run(...values);
     }
 
     if (change.row.deleted) {
-      this.options.db.query(`DELETE FROM ${change.table} WHERE id = ?1`).run(change.row.id);
+      this.options.db.query(`DELETE FROM ${quoteIdentifier(change.table)} WHERE id = ?1`).run(change.row.id);
     }
 
     this.setState(`row_hlc:${change.table}:${change.row.id}`, change.row.hlc);
@@ -130,9 +183,18 @@ export class SyncClient {
   }
 
   async syncNow(): Promise<{ pushed: number; pulled: number }> {
-    const pushed = await this.push();
-    const pulled = await this.pull();
-    return { pushed, pulled };
+    const queued = this.readQueuedChanges().length;
+    this.options.onSyncStart?.({ queued, checkpoint: this.getState("checkpoint") || undefined });
+    try {
+      const pushed = await this.push();
+      const pulled = await this.pull();
+      const checkpoint = this.getState("checkpoint");
+      this.options.onSyncSuccess?.({ pushed, pulled, checkpoint });
+      return { pushed, pulled };
+    } catch (error) {
+      this.emitError(error);
+      throw error;
+    }
   }
 }
 

@@ -7,3 +7,6 @@ export * from "./memory-backend";
 export * from "./sqlite-backend";
 export * from "./setup";
 export * from "./introspection";
+export * from "./drizzle";
+export * from "./events";
+export * from "./utils";

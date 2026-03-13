@@ -1,17 +1,38 @@
+import { quoteIdentifier, unique } from "./utils";
+
 export function metadataSql(): string[] {
   return [
-    `CREATE TABLE IF NOT EXISTS _sync_queue (\n      seq INTEGER PRIMARY KEY AUTOINCREMENT,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT,\n      hlc TEXT NOT NULL,\n      payload TEXT NOT NULL\n    );`,
+    `CREATE TABLE IF NOT EXISTS _sync_queue (\n      seq INTEGER PRIMARY KEY AUTOINCREMENT,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT,\n      hlc TEXT NOT NULL,\n      payload TEXT NOT NULL,\n      attempts INTEGER NOT NULL DEFAULT 0,\n      locked INTEGER NOT NULL DEFAULT 0,\n      last_error TEXT\n    );`,
+    `CREATE INDEX IF NOT EXISTS _sync_queue_table_seq_idx ON _sync_queue(table_name, seq);`,
     `CREATE TABLE IF NOT EXISTS _sync_state (\n      key TEXT PRIMARY KEY,\n      value TEXT NOT NULL\n    );`,
   ];
 }
 
-export function triggerSql(table: string, columns: string[]): string[] {
-  const jsonObjectArgs = columns.flatMap((column) => [`'${column}'`, `NEW.${column}`]).join(", ");
-  const oldUser = columns.includes("user_id") ? "OLD.user_id" : "NULL";
-  const newUser = columns.includes("user_id") ? "NEW.user_id" : "NULL";
+export interface TriggerSqlOptions {
+  deletedAtColumn?: string;
+  userIdColumn?: string;
+  idColumn?: string;
+}
+
+export function triggerSql(table: string, columns: string[], options: TriggerSqlOptions = {}): string[] {
+  const normalizedColumns = unique(columns);
+  const userIdColumn = options.userIdColumn ?? "user_id";
+  const idColumn = options.idColumn ?? "id";
+  const deletedAtColumn = options.deletedAtColumn;
+  const qTable = quoteIdentifier(table);
+  const qId = quoteIdentifier(idColumn);
+  const hasUser = normalizedColumns.includes(userIdColumn);
+  const jsonObjectArgs = normalizedColumns.flatMap((column) => [`'${column}'`, `NEW.${quoteIdentifier(column)}`]).join(", ");
+  const oldUser = hasUser ? `OLD.${quoteIdentifier(userIdColumn)}` : "NULL";
+  const newUser = hasUser ? `NEW.${quoteIdentifier(userIdColumn)}` : "NULL";
+  const softDeleteWhen = deletedAtColumn
+    ? `WHEN OLD.${quoteIdentifier(deletedAtColumn)} IS NULL AND NEW.${quoteIdentifier(deletedAtColumn)} IS NOT NULL `
+    : "";
   return [
-    `CREATE TRIGGER IF NOT EXISTS ${table}_sync_insert AFTER INSERT ON ${table} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'upsert', NEW.id, ${newUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object(${jsonObjectArgs}));\n    END;`,
-    `CREATE TRIGGER IF NOT EXISTS ${table}_sync_update AFTER UPDATE ON ${table} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'upsert', NEW.id, ${newUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object(${jsonObjectArgs}));\n    END;`,
-    `CREATE TRIGGER IF NOT EXISTS ${table}_sync_delete AFTER DELETE ON ${table} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'delete', OLD.id, ${oldUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('id', OLD.id));\n    END;`,
+    `CREATE TRIGGER IF NOT EXISTS ${table}_sync_insert AFTER INSERT ON ${qTable} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'upsert', NEW.${qId}, ${newUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object(${jsonObjectArgs}));\n    END;`,
+    `CREATE TRIGGER IF NOT EXISTS ${table}_sync_update AFTER UPDATE ON ${qTable} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'upsert', NEW.${qId}, ${newUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object(${jsonObjectArgs}));\n    END;`,
+    deletedAtColumn
+      ? `CREATE TRIGGER IF NOT EXISTS ${table}_sync_soft_delete AFTER UPDATE ON ${qTable} ${softDeleteWhen}BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'delete', NEW.${qId}, ${newUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('${idColumn}', NEW.${qId}, '${deletedAtColumn}', NEW.${quoteIdentifier(deletedAtColumn)}));\n    END;`
+      : `CREATE TRIGGER IF NOT EXISTS ${table}_sync_delete AFTER DELETE ON ${qTable} BEGIN\n      INSERT INTO _sync_queue (table_name, op, row_id, user_id, hlc, payload)\n      VALUES ('${table}', 'delete', OLD.${qId}, ${oldUser}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('${idColumn}', OLD.${qId}));\n    END;`,
   ];
 }

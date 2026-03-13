@@ -48,4 +48,10 @@ export interface SyncClientOptions {
   backend: SyncBackend;
   userId: string;
   tables: string[];
+  autoStart?: boolean;
+  intervalMs?: number;
+  onSyncStart?: (event: { queued: number; checkpoint?: string }) => void;
+  onSyncSuccess?: (event: { pushed: number; pulled: number; checkpoint: string }) => void;
+  onConflict?: (event: { change: SyncChange }) => void;
+  onError?: (event: { error: unknown }) => void;
 }
