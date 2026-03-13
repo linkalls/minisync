@@ -13,22 +13,21 @@ Drizzle-first local-first sync engine for SQLite apps.
 ## いちばん理想の使い方
 
 **既存の Auth.js 入りサーバーに、sync route を1個足すだけ。**
-
-`minisync` は auth の主役にならない。
-既存の session / auth middleware の結果を読んで、sync に渡すだけ。
+クライアント側は **Drizzle schema を渡すだけ** に近づけてある。
 
 ---
 
-## 最短のおすすめ構成
+## 今のおすすめ導線
 
-### 1. Drizzle テーブルを同期対象にする
+### client
 
 ```ts
 import { Database } from "bun:sqlite";
 import { sqliteTable, text } from "drizzle-orm/sqlite-core";
-import { installSync, syncTable } from "minisync";
+import { createDrizzleSyncClient, HttpSyncBackend } from "minisync";
 
 const db = new Database("app.db");
+db.exec("create table if not exists notes (id text primary key, user_id text not null, title text not null, deleted_at text)");
 
 const notes = sqliteTable("notes", {
   id: text("id").primaryKey(),
@@ -37,23 +36,10 @@ const notes = sqliteTable("notes", {
   deletedAt: text("deleted_at"),
 });
 
-installSync({
-  db,
-  tables: [syncTable(notes)],
-});
-```
-
----
-
-### 2. クライアントを作る
-
-```ts
-import { createSyncClient, HttpSyncBackend } from "minisync";
-
 const session = { user: { id: "u1" } };
 const token = "your-auth-token";
 
-const client = createSyncClient({
+const sync = createDrizzleSyncClient({
   db,
   backend: new HttpSyncBackend({
     baseUrl: "https://api.example.com/api/sync",
@@ -62,17 +48,22 @@ const client = createSyncClient({
     },
   }),
   userId: session.user.id,
-  tables: ["notes"],
+  schema: [notes],
   intervalMs: 5000,
+  autoStart: true,
 });
 
-client.start();
-await client.syncNow();
+await sync.syncNow();
 ```
+
+これで:
+- `installSync(...)` を手で呼ばなくていい
+- `tables: ["notes"]` を別で書かなくていい
+- Drizzle schema から同期対象を解決する
 
 ---
 
-### 3. 既存の Auth.js サーバーに route を足す
+### server (Auth.js / Next.js route)
 
 ```ts
 // app/api/sync/[action]/route.ts
@@ -91,6 +82,34 @@ export const { POST } = createSyncRouteHandlers({
 ```
 
 これが今の **一番おすすめの導線**。
+
+---
+
+## 低レベルAPIもある
+
+必要なら細かく組むこともできる。
+
+### setup を明示したい場合
+
+```ts
+installSync({
+  db,
+  tables: [syncTable(notes)],
+});
+```
+
+### client を明示したい場合
+
+```ts
+createSyncClient({
+  db,
+  backend,
+  userId,
+  tables: ["notes"],
+});
+```
+
+でも、基本は **`createDrizzleSyncClient(...)` をおすすめ**。
 
 ---
 
@@ -151,18 +170,6 @@ const auth = bearerTokenAuth({
 });
 ```
 
-### 複数対応
-
-```ts
-import { authJsAuth, chainAuth, clerkAuth, jwtClaimsAuth } from "minisync";
-
-const auth = chainAuth(
-  authJsAuth({ getSession: async (c) => getSessionFromYourApp(c) }),
-  clerkAuth(),
-  jwtClaimsAuth(),
-);
-```
-
 ---
 
 ## route handler 方式と server helper 方式
@@ -197,73 +204,13 @@ const auth = chainAuth(
 - Supabase RPC ベース
 - `supabaseSqlSetup()` で SQL scaffold を出せる
 
-```ts
-import { createClient } from "@supabase/supabase-js";
-import { SupabaseSyncBackend, supabaseSqlSetup } from "minisync";
-
-const supabase = createClient(url, anonKey);
-const backend = new SupabaseSyncBackend({ client: supabase });
-const sql = supabaseSqlSetup();
-```
-
----
-
-## Drizzle を使わない場合
-
-raw SQL でも使える。
-ただ、これは **fallback** 扱い。
-基本は Drizzle をおすすめする。
-
-```ts
-installSync({
-  db,
-  tables: [
-    syncTable("notes", {
-      columns: ["id", "user_id", "title", "deleted_at"],
-      deletedAtColumn: "deleted_at",
-    }),
-  ],
-});
-```
-
----
-
-## いま入ってる機能
-
-- Drizzle-first setup API
-- local SQLite を主にする同期モデル
-- trigger ベース変更追跡
-- `_sync_queue`, `_sync_state`
-- HLC ordering
-- LWW conflict resolution
-- soft delete (`deleted_at`)
-- push / pull
-- partial ack
-- retry / dead-letter
-- embedded route handlers
-- auth-aware server helper
-- Auth.js / Clerk / JWT / custom auth adapters
-- SQLite / Postgres / Supabase backend entrypoints
-- Hono server helper
-- GitHub Actions CI
-
----
-
-## まだ注意が必要なところ
-
-- 本番 auth の検証ロジック
-- migration 戦略
-- サーバー側の durable storage 設計
-- テーブルごとの細かい apply policy
-- 高度な競合解決（今は基本 LWW）
-
 ---
 
 ## examples
 
-- `examples/client.ts` → Drizzle client example
-- `examples/http-server.ts` → standalone server helper example
+- `examples/drizzle-client.ts` → 今のおすすめ client 例
 - `examples/next-authjs-route.ts` → 既存 Auth.js サーバーに route を足す例
+- `examples/http-server.ts` → standalone server helper example
 - `examples/supabase.ts` → Supabase backend example
 
 ---
