@@ -88,6 +88,10 @@ export class SqliteSyncBackend implements SyncBackend {
       accepted += 1;
     }
 
-    return { accepted, checkpoint: latest };
+    return {
+      accepted,
+      checkpoint: latest,
+      acknowledgedIds: request.changes.map((change) => `${change.table}:${change.row.id}`),
+    };
   }
 }

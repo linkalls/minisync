@@ -13,6 +13,7 @@ interface QueueRow {
   payload: string;
   attempts: number;
   locked: number;
+  dead_lettered?: number;
 }
 
 export class SyncClient {
@@ -64,7 +65,7 @@ export class SyncClient {
     const placeholders = this.options.tables.map(() => "?").join(", ");
     return this.options.db
       .query(
-        `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked FROM _sync_queue WHERE locked = 0 AND table_name IN (${placeholders}) ORDER BY seq ASC`,
+        `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked, dead_lettered FROM _sync_queue WHERE locked = 0 AND dead_lettered = 0 AND table_name IN (${placeholders}) ORDER BY seq ASC`,
       )
       .all(...this.options.tables) as QueueRow[];
   }
@@ -85,7 +86,7 @@ export class SyncClient {
     const message = error instanceof Error ? error.message : String(error);
     for (const row of rows) {
       this.options.db
-        .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2 WHERE seq = ?1")
+        .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1")
         .run(row.seq, message);
     }
   }
@@ -110,11 +111,23 @@ export class SyncClient {
     if (queued.length === 0) return 0;
     this.lockQueuedRows(queued);
     try {
+      const mapped = queued.map((row) => this.mapQueueRow(row));
       const response = await this.options.backend.pushChanges({
         userId: this.options.userId,
-        changes: queued.map((row) => this.mapQueueRow(row)),
+        changes: mapped,
       });
-      this.acknowledgeQueuedRows(queued);
+      const ackIds = new Set(response.acknowledgedIds ?? mapped.map((change) => `${change.table}:${change.row.id}`));
+      const acknowledgedRows = queued.filter((row) => ackIds.has(`${row.table_name}:${row.row_id}`));
+      const rejectedRows = queued.filter((row) => !ackIds.has(`${row.table_name}:${row.row_id}`));
+      this.acknowledgeQueuedRows(acknowledgedRows);
+      if (rejectedRows.length > 0) {
+        for (const row of rejectedRows) {
+          const rejection = response.rejected?.find((item) => item.id === `${row.table_name}:${row.row_id}`);
+          this.options.db
+            .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2 WHERE seq = ?1")
+            .run(row.seq, rejection?.reason ?? "rejected by backend");
+        }
+      }
       this.setState("checkpoint", response.checkpoint);
       return response.accepted;
     } catch (error) {

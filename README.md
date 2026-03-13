@@ -9,16 +9,20 @@ Tiny OSS local-first sync engine for SQLite-first apps.
 - HLC timestamps
 - LWW conflict resolution
 - Push / pull client orchestration via backend adapters
+- Partial acknowledgements for push responses
 - Queue lock / retry state for failed pushes
+- Dead-lettering after repeated failures
 - Event hooks: `onSyncStart`, `onSyncSuccess`, `onConflict`, `onError`
 - SQLite backend for local/dev and integration testing
 - HTTP backend adapter + Hono server helper
+- Auth-aware sync server helper
 - Queue / state introspection helpers
 - Drizzle-first helpers with inferred columns
+- Postgres backend scaffold
 - Bun test coverage
 
 ## Status
-Usable prototype / MVP. Still not fully production-ready, but now much closer to a real app integration shape.
+Production-leaning prototype. Core pieces for real integration exist, but you should still audit auth, migrations, and backend persistence strategy for your deployment.
 
 ## Better setup API
 ```ts
@@ -73,8 +77,21 @@ const db = new Database("sync.db");
 const backend = new SqliteSyncBackend({ db });
 backend.init();
 
-export default createSyncServer({ backend });
+export default createSyncServer({
+  backend,
+  auth: async (c) => {
+    const token = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!token) return null;
+    return { userId: token };
+  },
+});
 ```
+
+## Production notes
+- Put your own auth verifier in `createSyncServer({ auth })`
+- Prefer WAL mode for SQLite-backed deployments
+- Use the Postgres backend scaffold for managed SQL backends
+- Treat the included examples as starting points, not final infra
 
 ## Run tests
 ```bash

@@ -45,6 +45,7 @@ export class MemorySyncBackend implements SyncBackend {
     return {
       accepted: request.changes.length,
       checkpoint: this.lastCheckpoint,
+      acknowledgedIds: request.changes.map((change) => `${change.table}:${change.row.id}`),
     };
   }
 }

@@ -2,7 +2,7 @@ import { quoteIdentifier, unique } from "./utils";
 
 export function metadataSql(): string[] {
   return [
-    `CREATE TABLE IF NOT EXISTS _sync_queue (\n      seq INTEGER PRIMARY KEY AUTOINCREMENT,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT,\n      hlc TEXT NOT NULL,\n      payload TEXT NOT NULL,\n      attempts INTEGER NOT NULL DEFAULT 0,\n      locked INTEGER NOT NULL DEFAULT 0,\n      last_error TEXT\n    );`,
+    `CREATE TABLE IF NOT EXISTS _sync_queue (\n      seq INTEGER PRIMARY KEY AUTOINCREMENT,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT,\n      hlc TEXT NOT NULL,\n      payload TEXT NOT NULL,\n      attempts INTEGER NOT NULL DEFAULT 0,\n      locked INTEGER NOT NULL DEFAULT 0,\n      dead_lettered INTEGER NOT NULL DEFAULT 0,\n      last_error TEXT\n    );`,
     `CREATE INDEX IF NOT EXISTS _sync_queue_table_seq_idx ON _sync_queue(table_name, seq);`,
     `CREATE TABLE IF NOT EXISTS _sync_state (\n      key TEXT PRIMARY KEY,\n      value TEXT NOT NULL\n    );`,
   ];

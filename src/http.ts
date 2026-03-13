@@ -22,7 +22,10 @@ export class HttpSyncBackend implements SyncBackend {
       },
       body: JSON.stringify(request),
     });
-    if (!response.ok) throw new Error(`Pull failed: ${response.status}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Pull failed: ${response.status} ${text}`);
+    }
     return (await response.json()) as PullResponse;
   }
 
@@ -35,7 +38,10 @@ export class HttpSyncBackend implements SyncBackend {
       },
       body: JSON.stringify(request),
     });
-    if (!response.ok) throw new Error(`Push failed: ${response.status}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Push failed: ${response.status} ${text}`);
+    }
     return (await response.json()) as PushResponse;
   }
 }

@@ -186,16 +186,24 @@ describe("SQLite queue + sync client", () => {
     expect(table.columns).toEqual(["id", "user_id", "title"]);
   });
 
-  test("HTTP backend can talk to Hono sync server", async () => {
+  test("HTTP backend can talk to Hono sync server with auth", async () => {
     const backend = new MemorySyncBackend();
-    const app = createSyncServer({ backend });
+    const app = createSyncServer({
+      backend,
+      auth(c) {
+        const token = c.req.header("authorization");
+        if (!token) return null;
+        return { userId: token.replace(/^Bearer\s+/i, "") };
+      },
+    });
     const http = new HttpSyncBackend({
       baseUrl: "http://sync.test",
+      headers: { authorization: "Bearer u1" },
       fetch: (input, init) => app.request(input, init),
     });
 
     const pushed = await http.pushChanges({
-      userId: "u1",
+      userId: "wrong-user",
       changes: [
         {
           table: "notes",
@@ -205,9 +213,50 @@ describe("SQLite queue + sync client", () => {
       ],
     });
     expect(pushed.accepted).toBe(1);
+    expect(pushed.acknowledgedIds).toEqual(["notes:n1"]);
 
-    const pulled = await http.pullChanges({ userId: "u1", tables: ["notes"] });
+    const pulled = await http.pullChanges({ userId: "wrong-user", tables: ["notes"] });
     expect(pulled.changes).toHaveLength(1);
+  });
+
+  test("server rejects unauthenticated requests when auth is enabled", async () => {
+    const app = createSyncServer({ backend: new MemorySyncBackend(), auth: () => null });
+    const http = new HttpSyncBackend({
+      baseUrl: "http://sync.test",
+      fetch: (input, init) => app.request(input, init),
+    });
+
+    await expect(http.pullChanges({ userId: "u1", tables: ["notes"] })).rejects.toThrow("401");
+  });
+
+  test("dead-letters queue rows after repeated failures", async () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+
+    const client = createSyncClient({
+      db,
+      backend: {
+        async pullChanges() {
+          return { checkpoint: "", changes: [] };
+        },
+        async pushChanges() {
+          throw new Error("boom");
+        },
+      },
+      userId: "u1",
+      tables: ["notes"],
+    });
+    client.start();
+
+    for (let i = 0; i < 10; i++) {
+      await expect(client.push()).rejects.toThrow("boom");
+    }
+
+    const row = db.query("SELECT attempts, dead_lettered FROM _sync_queue LIMIT 1").get() as { attempts: number; dead_lettered: number };
+    expect(row.attempts).toBe(10);
+    expect(row.dead_lettered).toBe(1);
   });
 
   test("rejects ownership mismatch", async () => {

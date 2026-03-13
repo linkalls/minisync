@@ -12,4 +12,6 @@ export * from "./drizzle";
 export * from "./events";
 export * from "./http";
 export * from "./server";
+export * from "./postgres";
+export * from "./errors";
 export * from "./utils";

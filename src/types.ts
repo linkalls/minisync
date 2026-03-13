@@ -36,6 +36,8 @@ export interface PushRequest {
 export interface PushResponse {
   accepted: number;
   checkpoint: string;
+  acknowledgedIds?: string[];
+  rejected?: Array<{ id: string; reason: string }>;
 }
 
 export interface SyncBackend {
