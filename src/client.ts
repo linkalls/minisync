@@ -61,13 +61,21 @@ export class SyncClient {
       .run(key, value);
   }
 
-  private readQueuedChanges(): QueueRow[] {
+  private readQueuedChanges(limit?: number, minSeq?: number): QueueRow[] {
     const placeholders = this.options.tables.map(() => "?").join(", ");
-    return this.options.db
-      .query(
-        `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked, dead_lettered FROM _sync_queue WHERE locked = 0 AND dead_lettered = 0 AND table_name IN (${placeholders}) ORDER BY seq ASC`,
-      )
-      .all(...this.options.tables) as QueueRow[];
+    let queryStr = `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked, dead_lettered FROM _sync_queue WHERE locked = 0 AND dead_lettered = 0 AND table_name IN (${placeholders})`;
+
+    const params: unknown[] = [...this.options.tables];
+    if (minSeq !== undefined) {
+      queryStr += ` AND seq > ?`;
+      params.push(minSeq);
+    }
+    queryStr += ` ORDER BY seq ASC`;
+
+    if (limit) {
+      queryStr += ` LIMIT ${limit}`;
+    }
+    return this.options.db.query(queryStr).all(...params) as QueueRow[];
   }
 
   private lockQueuedRows(rows: QueueRow[]) {
@@ -107,34 +115,51 @@ export class SyncClient {
   }
 
   async push(): Promise<number> {
-    const queued = this.readQueuedChanges();
-    if (queued.length === 0) return 0;
-    this.lockQueuedRows(queued);
-    try {
-      const mapped = queued.map((row) => this.mapQueueRow(row));
-      const response = await this.options.backend.pushChanges({
-        userId: this.options.userId,
-        changes: mapped,
-      });
-      const ackIds = new Set(response.acknowledgedIds ?? mapped.map((change) => `${change.table}:${change.row.id}`));
-      const acknowledgedRows = queued.filter((row) => ackIds.has(`${row.table_name}:${row.row_id}`));
-      const rejectedRows = queued.filter((row) => !ackIds.has(`${row.table_name}:${row.row_id}`));
-      this.acknowledgeQueuedRows(acknowledgedRows);
-      if (rejectedRows.length > 0) {
-        for (const row of rejectedRows) {
-          const rejection = response.rejected?.find((item) => item.id === `${row.table_name}:${row.row_id}`);
-          this.options.db
-            .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2 WHERE seq = ?1")
-            .run(row.seq, rejection?.reason ?? "rejected by backend");
-        }
+    const batchSize = this.options.batchSize ?? 100;
+    let totalPushed = 0;
+    let lastSeq = -1;
+
+    while (true) {
+      const queued = this.readQueuedChanges(batchSize, lastSeq);
+      if (queued.length === 0) break;
+
+      this.lockQueuedRows(queued);
+      try {
+        const mapped = queued.map((row) => this.mapQueueRow(row));
+        const response = await this.options.backend.pushChanges({
+          userId: this.options.userId,
+          changes: mapped,
+        });
+
+        const ackIds = new Set(response.acknowledgedIds ?? mapped.map((change) => `${change.table}:${change.row.id}`));
+        const acknowledgedRows = queued.filter((row) => ackIds.has(`${row.table_name}:${row.row_id}`));
+        const rejectedRows = queued.filter((row) => !ackIds.has(`${row.table_name}:${row.row_id}`));
+
+        this.options.db.transaction(() => {
+          this.acknowledgeQueuedRows(acknowledgedRows);
+          if (rejectedRows.length > 0) {
+            for (const row of rejectedRows) {
+              const rejection = response.rejected?.find((item) => item.id === `${row.table_name}:${row.row_id}`);
+              this.options.db
+                .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1")
+                .run(row.seq, rejection?.reason ?? "rejected by backend");
+            }
+          }
+          this.setState("checkpoint", response.checkpoint);
+        })();
+
+        totalPushed += response.accepted;
+        lastSeq = queued[queued.length - 1].seq;
+
+        if (queued.length < batchSize) break;
+      } catch (error) {
+        this.failQueuedRows(queued, error);
+        this.emitError(error);
+        throw error;
       }
-      this.setState("checkpoint", response.checkpoint);
-      return response.accepted;
-    } catch (error) {
-      this.failQueuedRows(queued, error);
-      this.emitError(error);
-      throw error;
     }
+
+    return totalPushed;
   }
 
   private applyRemoteChange(change: SyncChange) {
@@ -182,17 +207,33 @@ export class SyncClient {
   }
 
   async pull(): Promise<number> {
-    const checkpoint = this.getState("checkpoint") || undefined;
-    const response = await this.options.backend.pullChanges({
-      userId: this.options.userId,
-      checkpoint,
-      tables: this.options.tables,
-    });
-    for (const change of response.changes) {
-      this.applyRemoteChange(change);
+    let checkpoint = this.getState("checkpoint") || undefined;
+    const batchSize = this.options.batchSize ?? 100;
+    let totalPulled = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.options.backend.pullChanges({
+        userId: this.options.userId,
+        checkpoint,
+        tables: this.options.tables,
+        limit: batchSize,
+      });
+
+      this.options.db.transaction(() => {
+        for (const change of response.changes) {
+          this.applyRemoteChange(change);
+        }
+        this.setState("checkpoint", response.checkpoint);
+      })();
+
+      totalPulled += response.changes.length;
+      checkpoint = response.checkpoint;
+
+      hasMore = response.hasMore ?? (response.changes.length >= batchSize);
     }
-    this.setState("checkpoint", response.checkpoint);
-    return response.changes.length;
+
+    return totalPulled;
   }
 
   async syncNow(): Promise<{ pushed: number; pulled: number }> {

@@ -24,9 +24,10 @@ export class SupabaseSyncBackend implements SyncBackend {
       p_user_id: request.userId,
       p_checkpoint: request.checkpoint ?? null,
       p_tables: request.tables ?? null,
+      p_limit: request.limit ?? 100,
     });
     if (error) throw new Error(`Supabase pull failed: ${error.message}`);
-    return data ?? { checkpoint: request.checkpoint ?? "", changes: [] };
+    return data ?? { checkpoint: request.checkpoint ?? "", changes: [], hasMore: false };
   }
 
   async pushChanges(request: PushRequest): Promise<PushResponse> {
@@ -54,17 +55,23 @@ create table if not exists ${schema}.${changesTable} (
   payload jsonb not null
 );
 
-create or replace function ${schema}.minisync_pull(p_user_id text, p_checkpoint text default null, p_tables text[] default null)
+create or replace function ${schema}.minisync_pull(p_user_id text, p_checkpoint text default null, p_tables text[] default null, p_limit int default 100)
 returns jsonb
 language sql
 as $$
-  with rows as (
+  with fetched as (
     select checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload
     from ${schema}.${changesTable}
     where user_id = p_user_id
       and (p_checkpoint is null or checkpoint > p_checkpoint)
       and (p_tables is null or table_name = any(p_tables))
     order by checkpoint asc
+    limit p_limit + 1
+  ),
+  rows as (
+    select * from fetched
+    order by checkpoint asc
+    limit p_limit
   )
   select jsonb_build_object(
     'checkpoint', coalesce((select checkpoint from rows order by checkpoint desc limit 1), coalesce(p_checkpoint, '')),
@@ -78,7 +85,8 @@ as $$
         'hlc', hlc,
         'deleted', deleted
       )
-    )), '[]'::jsonb)
+    )), '[]'::jsonb),
+    'hasMore', (select count(*) from fetched) > p_limit
   )
   from rows;
 $$;

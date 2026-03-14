@@ -21,11 +21,13 @@ export interface PullRequest {
   userId: string;
   checkpoint?: string;
   tables?: string[];
+  limit?: number;
 }
 
 export interface PullResponse {
   checkpoint: string;
   changes: SyncChange[];
+  hasMore?: boolean;
 }
 
 export interface PushRequest {
@@ -52,6 +54,7 @@ export interface SyncClientOptions {
   tables: string[];
   autoStart?: boolean;
   intervalMs?: number;
+  batchSize?: number;
   onSyncStart?: (event: { queued: number; checkpoint?: string }) => void;
   onSyncSuccess?: (event: { pushed: number; pulled: number; checkpoint: string }) => void;
   onConflict?: (event: { change: SyncChange }) => void;

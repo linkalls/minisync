@@ -33,6 +33,25 @@ export class PostgresSyncBackend implements SyncBackend {
   }
 
   async pullChanges(request: PullRequest): Promise<PullResponse> {
+    const limit = request.limit ?? 100;
+    const limitPlusOne = limit + 1;
+
+    let queryStr = `
+      select checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload
+      from ${this.changesTable}
+      where user_id = $1 and ($2::text is null or checkpoint > $2)
+    `;
+    const params: unknown[] = [request.userId, request.checkpoint ?? null];
+
+    if (request.tables && request.tables.length > 0) {
+      const placeholders = request.tables.map((_, i) => `$${i + 3}`).join(", ");
+      queryStr += ` and table_name in (${placeholders})`;
+      params.push(...request.tables);
+    }
+
+    queryStr += ` order by checkpoint asc limit $${params.length + 1}`;
+    params.push(limitPlusOne);
+
     const result = await this.options.sql.query<{
       checkpoint: string;
       table_name: string;
@@ -42,15 +61,14 @@ export class PostgresSyncBackend implements SyncBackend {
       hlc: string;
       deleted: boolean;
       payload: Record<string, unknown>;
-    }>(
-      `select checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload
-       from ${this.changesTable}
-       where user_id = $1 and ($2::text is null or checkpoint > $2)
-       order by checkpoint asc`,
-      [request.userId, request.checkpoint ?? null],
-    );
+    }>(queryStr, params);
 
-    const rows = result.rows.filter((row) => !request.tables || request.tables.includes(row.table_name));
+    let rows = result.rows;
+    const hasMore = rows.length > limit;
+    if (hasMore) {
+      rows = rows.slice(0, limit);
+    }
+
     return {
       checkpoint: rows.at(-1)?.checkpoint ?? request.checkpoint ?? "",
       changes: rows.map((row) => ({
@@ -64,6 +82,7 @@ export class PostgresSyncBackend implements SyncBackend {
           deleted: row.deleted,
         },
       })),
+      hasMore,
     };
   }
 

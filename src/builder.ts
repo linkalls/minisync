@@ -11,6 +11,7 @@ export interface CreateDrizzleSyncClientOptions {
   autoInstall?: boolean;
   intervalMs?: number;
   autoStart?: boolean;
+  batchSize?: number;
   onSyncStart?: SyncClientOptions["onSyncStart"];
   onSyncSuccess?: SyncClientOptions["onSyncSuccess"];
   onConflict?: SyncClientOptions["onConflict"];
@@ -33,6 +34,7 @@ export function createDrizzleSyncClient(options: CreateDrizzleSyncClientOptions)
     tables: tables.map((table) => table.name),
     intervalMs: options.intervalMs,
     autoStart: options.autoStart,
+    batchSize: options.batchSize,
     onSyncStart: options.onSyncStart,
     onSyncSuccess: options.onSyncSuccess,
     onConflict: options.onConflict,
