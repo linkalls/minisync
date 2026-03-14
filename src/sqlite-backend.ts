@@ -2,8 +2,10 @@ import { resolveLww } from "./conflict";
 import type { PullRequest, PullResponse, PushRequest, PushResponse, SyncBackend, SyncChange } from "./types";
 import { quoteIdentifier } from "./utils";
 
+import type { AsyncDatabase } from "./types";
+
 export interface SqliteBackendOptions {
-  db: Database;
+  db: AsyncDatabase;
   changesTable?: string;
 }
 
@@ -25,10 +27,10 @@ export class SqliteSyncBackend implements SyncBackend {
     this.changesTable = options.changesTable ?? "_remote_changes";
   }
 
-  init() {
+  async init() {
     const table = quoteIdentifier(this.changesTable);
-    this.options.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (\n      checkpoint TEXT PRIMARY KEY,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT NOT NULL,\n      hlc TEXT NOT NULL,\n      deleted INTEGER NOT NULL DEFAULT 0,\n      payload TEXT NOT NULL\n    );`);
-    this.options.db.exec(`CREATE INDEX IF NOT EXISTS ${this.changesTable}_user_checkpoint_idx ON ${table}(user_id, checkpoint);`);
+    await this.options.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (\n      checkpoint TEXT PRIMARY KEY,\n      table_name TEXT NOT NULL,\n      op TEXT NOT NULL,\n      row_id TEXT NOT NULL,\n      user_id TEXT NOT NULL,\n      hlc TEXT NOT NULL,\n      deleted INTEGER NOT NULL DEFAULT 0,\n      payload TEXT NOT NULL\n    );`);
+    await this.options.db.exec(`CREATE INDEX IF NOT EXISTS ${this.changesTable}_user_checkpoint_idx ON ${table}(user_id, checkpoint);`);
   }
 
   async pullChanges(request: PullRequest): Promise<PullResponse> {
@@ -47,9 +49,7 @@ export class SqliteSyncBackend implements SyncBackend {
     const limit = request.limit ?? 100;
     queryStr += ` LIMIT ${limit + 1}`;
 
-    const rows = this.options.db
-      .query(queryStr)
-      .all(...params) as StoredChangeRow[];
+    const rows = await this.options.db.query(queryStr, params) as StoredChangeRow[];
 
     const hasMore = rows.length > limit;
     const resultRows = hasMore ? rows.slice(0, limit) : rows;
@@ -72,16 +72,14 @@ export class SqliteSyncBackend implements SyncBackend {
   }
 
   async pushChanges(request: PushRequest): Promise<PushResponse> {
-    this.init();
+    await this.init();
     const table = quoteIdentifier(this.changesTable);
     let accepted = 0;
     let latest = "";
 
     for (const change of request.changes) {
       if (change.row.userId !== request.userId) throw new Error("ownership mismatch");
-      const existing = this.options.db
-        .query(`SELECT checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload FROM ${table} WHERE table_name = ?1 AND row_id = ?2 AND user_id = ?3 ORDER BY checkpoint DESC LIMIT 1`)
-        .get(change.table, change.row.id, change.row.userId) as StoredChangeRow | null;
+      const existing = await this.options.db.get(`SELECT checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload FROM ${table} WHERE table_name = ?1 AND row_id = ?2 AND user_id = ?3 ORDER BY checkpoint DESC LIMIT 1`, [change.table, change.row.id, change.row.userId]) as StoredChangeRow | null;
 
       const finalRow = existing
         ? resolveLww(
@@ -98,9 +96,10 @@ export class SqliteSyncBackend implements SyncBackend {
 
       const finalOp = finalRow.deleted ? "delete" : "upsert";
       latest = finalRow.hlc;
-      this.options.db
-        .query(`INSERT OR REPLACE INTO ${table} (checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
-        .run(latest, change.table, finalOp, finalRow.id, finalRow.userId, finalRow.hlc, finalRow.deleted ? 1 : 0, JSON.stringify(finalRow.data));
+      await this.options.db.exec(
+        `INSERT OR REPLACE INTO ${table} (checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+        [latest, change.table, finalOp, finalRow.id, finalRow.userId, finalRow.hlc, finalRow.deleted ? 1 : 0, JSON.stringify(finalRow.data)]
+      );
       accepted += 1;
     }
 

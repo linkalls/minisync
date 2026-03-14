@@ -21,12 +21,12 @@ export class SyncClient {
 
   constructor(private readonly options: SyncClientOptions) {
     if (options.autoStart) {
-      this.start();
+      void this.start();
     }
   }
 
-  start() {
-    this.init();
+  async start() {
+    await this.init();
     if (this.options.intervalMs && !this.intervalId) {
       this.intervalId = setInterval(() => {
         void this.syncNow().catch((error) => this.emitError(error));
@@ -41,27 +41,28 @@ export class SyncClient {
     }
   }
 
-  init() {
-    this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('checkpoint', '')");
-    this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('last_hlc', '')");
+  async init() {
+    await this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('checkpoint', '')");
+    await this.options.db.exec("INSERT OR IGNORE INTO _sync_state (key, value) VALUES ('last_hlc', '')");
   }
 
   private emitError(error: unknown) {
     this.options.onError?.({ error });
   }
 
-  private getState(key: string): string {
-    const row = this.options.db.query("SELECT value FROM _sync_state WHERE key = ?1").get(key) as { value: string } | null;
+  private async getState(key: string, tx?: import("./types").AsyncDatabase): Promise<string> {
+    const db = tx ?? this.options.db;
+    const row = await db.get<{ value: string }>("SELECT value FROM _sync_state WHERE key = ?1", [key]);
     return row?.value ?? "";
   }
 
-  private setState(key: string, value: string) {
-    this.options.db
-      .query("INSERT INTO _sync_state(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-      .run(key, value);
+  private async setState(key: string, value: string, tx?: import("./types").AsyncDatabase) {
+    const db = tx ?? this.options.db;
+    await db.exec("INSERT INTO _sync_state(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
   }
 
-  private readQueuedChanges(limit?: number, minSeq?: number): QueueRow[] {
+  private async readQueuedChanges(limit?: number, minSeq?: number, tx?: import("./types").AsyncDatabase): Promise<QueueRow[]> {
+    const db = tx ?? this.options.db;
     const placeholders = this.options.tables.map(() => "?").join(", ");
     let queryStr = `SELECT seq, table_name, op, row_id, user_id, hlc, payload, attempts, locked, dead_lettered FROM _sync_queue WHERE locked = 0 AND dead_lettered = 0 AND table_name IN (${placeholders})`;
 
@@ -75,34 +76,38 @@ export class SyncClient {
     if (limit) {
       queryStr += ` LIMIT ${limit}`;
     }
-    return this.options.db.query(queryStr).all(...params) as QueueRow[];
+    return await db.query(queryStr, params) as QueueRow[];
   }
 
-  private lockQueuedRows(rows: QueueRow[]) {
+  private async lockQueuedRows(rows: QueueRow[], tx?: import("./types").AsyncDatabase) {
+    const db = tx ?? this.options.db;
     for (const row of rows) {
-      this.options.db.query("UPDATE _sync_queue SET locked = 1 WHERE seq = ?1").run(row.seq);
+      await db.exec("UPDATE _sync_queue SET locked = 1 WHERE seq = ?1", [row.seq]);
     }
   }
 
-  private acknowledgeQueuedRows(rows: QueueRow[]) {
+  private async acknowledgeQueuedRows(rows: QueueRow[], tx?: import("./types").AsyncDatabase) {
+    const db = tx ?? this.options.db;
     for (const row of rows) {
-      this.options.db.query("DELETE FROM _sync_queue WHERE seq = ?1").run(row.seq);
+      await db.exec("DELETE FROM _sync_queue WHERE seq = ?1", [row.seq]);
     }
   }
 
-  private failQueuedRows(rows: QueueRow[], error: unknown) {
+  private async failQueuedRows(rows: QueueRow[], error: unknown, tx?: import("./types").AsyncDatabase) {
+    const db = tx ?? this.options.db;
     const message = error instanceof Error ? error.message : String(error);
     for (const row of rows) {
-      this.options.db
-        .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1")
-        .run(row.seq, message);
+      await db.exec(
+        "UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1",
+        [row.seq, message]
+      );
     }
   }
 
-  private mapQueueRow(row: QueueRow): SyncChange {
-    const last = this.getState("last_hlc");
+  private async mapQueueRow(row: QueueRow, tx?: import("./types").AsyncDatabase): Promise<SyncChange> {
+    const last = await this.getState("last_hlc", tx);
     const hlc = nextHlc({ last, nodeId: "client" });
-    this.setState("last_hlc", hlc);
+    await this.setState("last_hlc", hlc, tx);
     const payload = JSON.parse(row.payload) as Record<string, string | number | boolean | null>;
     const syncRow: SyncRow = {
       id: row.row_id,
@@ -120,7 +125,7 @@ export class SyncClient {
     let lastSeq = -1;
 
     while (true) {
-      let queued = this.readQueuedChanges(batchSize, lastSeq);
+      let queued = await this.readQueuedChanges(batchSize, lastSeq);
       if (queued.length === 0) break;
 
       const latestSeqMap = new Map<string, number>();
@@ -130,9 +135,9 @@ export class SyncClient {
 
       const redundantRows = queued.filter((row) => latestSeqMap.get(`${row.table_name}:${row.row_id}`) !== row.seq);
       if (redundantRows.length > 0) {
-        this.options.db.transaction(() => {
-          this.acknowledgeQueuedRows(redundantRows);
-        })();
+        await this.options.db.transaction(async (tx) => {
+          await this.acknowledgeQueuedRows(redundantRows, tx);
+        });
         queued = queued.filter((row) => latestSeqMap.get(`${row.table_name}:${row.row_id}`) === row.seq);
       }
 
@@ -141,9 +146,12 @@ export class SyncClient {
         continue;
       }
 
-      this.lockQueuedRows(queued);
+      await this.lockQueuedRows(queued);
       try {
-        const mapped = queued.map((row) => this.mapQueueRow(row));
+        const mapped: SyncChange[] = [];
+        for (const row of queued) {
+          mapped.push(await this.mapQueueRow(row));
+        }
         const response = await this.options.backend.pushChanges({
           userId: this.options.userId,
           changes: mapped,
@@ -153,25 +161,26 @@ export class SyncClient {
         const acknowledgedRows = queued.filter((row) => ackIds.has(`${row.table_name}:${row.row_id}`));
         const rejectedRows = queued.filter((row) => !ackIds.has(`${row.table_name}:${row.row_id}`));
 
-        this.options.db.transaction(() => {
-          this.acknowledgeQueuedRows(acknowledgedRows);
+        await this.options.db.transaction(async (tx) => {
+          await this.acknowledgeQueuedRows(acknowledgedRows, tx);
           if (rejectedRows.length > 0) {
             for (const row of rejectedRows) {
               const rejection = response.rejected?.find((item) => item.id === `${row.table_name}:${row.row_id}`);
-              this.options.db
-                .query("UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1")
-                .run(row.seq, rejection?.reason ?? "rejected by backend");
+              await tx.exec(
+                "UPDATE _sync_queue SET locked = 0, attempts = attempts + 1, last_error = ?2, dead_lettered = CASE WHEN attempts + 1 >= 10 THEN 1 ELSE 0 END WHERE seq = ?1",
+                [row.seq, rejection?.reason ?? "rejected by backend"]
+              );
             }
           }
-          this.setState("checkpoint", response.checkpoint);
-        })();
+          await this.setState("checkpoint", response.checkpoint, tx);
+        });
 
         totalPushed += response.accepted;
         lastSeq = queued[queued.length - 1].seq;
 
         if (queued.length < batchSize) break;
       } catch (error) {
-        this.failQueuedRows(queued, error);
+        await this.failQueuedRows(queued, error);
         this.emitError(error);
         throw error;
       }
@@ -180,15 +189,12 @@ export class SyncClient {
     return totalPushed;
   }
 
-  private applyRemoteChange(change: SyncChange) {
-    const currentHlc = this.options.db
-      .query("SELECT value FROM _sync_state WHERE key = ?1")
-      .get(`row_hlc:${change.table}:${change.row.id}`) as { value: string } | null;
+  private async applyRemoteChange(change: SyncChange, tx?: import("./types").AsyncDatabase) {
+    const db = tx ?? this.options.db;
+    const currentHlc = await db.get<{ value: string }>("SELECT value FROM _sync_state WHERE key = ?1", [`row_hlc:${change.table}:${change.row.id}`]);
 
     if (currentHlc) {
-      const localDeleted = this.options.db
-        .query("SELECT value FROM _sync_state WHERE key = ?1")
-        .get(`row_deleted:${change.table}:${change.row.id}`) as { value: string } | null;
+      const localDeleted = await db.get<{ value: string }>("SELECT value FROM _sync_state WHERE key = ?1", [`row_deleted:${change.table}:${change.row.id}`]);
       const localRow: SyncRow = {
         id: change.row.id,
         userId: change.row.userId,
@@ -209,23 +215,22 @@ export class SyncClient {
       const quotedColumns = columns.map(quoteIdentifier);
       const values = columns.map((column) => change.row.data[column]);
       const updateAssignments = quotedColumns.map((column) => `${column} = excluded.${column}`).join(", ");
-      this.options.db
-        .query(
-          `INSERT INTO ${quoteIdentifier(change.table)} (${quotedColumns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateAssignments}`,
-        )
-        .run(...values);
+      await db.exec(
+        `INSERT INTO ${quoteIdentifier(change.table)} (${quotedColumns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateAssignments}`,
+        values
+      );
     }
 
     if (change.row.deleted) {
-      this.options.db.query(`DELETE FROM ${quoteIdentifier(change.table)} WHERE id = ?1`).run(change.row.id);
+      await db.exec(`DELETE FROM ${quoteIdentifier(change.table)} WHERE id = ?1`, [change.row.id]);
     }
 
-    this.setState(`row_hlc:${change.table}:${change.row.id}`, change.row.hlc);
-    this.setState(`row_deleted:${change.table}:${change.row.id}`, change.row.deleted ? "1" : "0");
+    await this.setState(`row_hlc:${change.table}:${change.row.id}`, change.row.hlc, tx);
+    await this.setState(`row_deleted:${change.table}:${change.row.id}`, change.row.deleted ? "1" : "0", tx);
   }
 
   async pull(): Promise<number> {
-    let checkpoint = this.getState("checkpoint") || undefined;
+    let checkpoint = await this.getState("checkpoint") || undefined;
     const batchSize = this.options.batchSize ?? 100;
     let totalPulled = 0;
     let hasMore = true;
@@ -238,17 +243,17 @@ export class SyncClient {
         limit: batchSize,
       });
 
-      this.options.db.transaction(() => {
+      await this.options.db.transaction(async (tx) => {
         try {
-          this.setState("is_syncing", "1");
+          await this.setState("is_syncing", "1", tx);
           for (const change of response.changes) {
-            this.applyRemoteChange(change);
+            await this.applyRemoteChange(change, tx);
           }
-          this.setState("checkpoint", response.checkpoint);
+          await this.setState("checkpoint", response.checkpoint, tx);
         } finally {
-          this.setState("is_syncing", "0");
+          await this.setState("is_syncing", "0", tx);
         }
-      })();
+      });
 
       totalPulled += response.changes.length;
       checkpoint = response.checkpoint;
@@ -260,12 +265,14 @@ export class SyncClient {
   }
 
   async syncNow(): Promise<{ pushed: number; pulled: number }> {
-    const queued = this.readQueuedChanges().length;
-    this.options.onSyncStart?.({ queued, checkpoint: this.getState("checkpoint") || undefined });
+    const queuedChanges = await this.readQueuedChanges();
+    const queued = queuedChanges.length;
+    const initialCheckpoint = await this.getState("checkpoint");
+    this.options.onSyncStart?.({ queued, checkpoint: initialCheckpoint || undefined });
     try {
       const pushed = await this.push();
       const pulled = await this.pull();
-      const checkpoint = this.getState("checkpoint");
+      const checkpoint = await this.getState("checkpoint");
       this.options.onSyncSuccess?.({ pushed, pulled, checkpoint });
       return { pushed, pulled };
     } catch (error) {

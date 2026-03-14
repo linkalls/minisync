@@ -47,8 +47,15 @@ export interface SyncBackend {
   pushChanges(request: PushRequest): Promise<PushResponse>;
 }
 
+export interface AsyncDatabase {
+  exec(sql: string, params?: unknown[]): Promise<void> | void;
+  query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]> | T[];
+  get<T = unknown>(sql: string, params?: unknown[]): Promise<T | null> | T | null;
+  transaction<T>(fn: (tx: AsyncDatabase) => Promise<T> | T): Promise<T> | T;
+}
+
 export interface SyncClientOptions {
-  db: Database;
+  db: AsyncDatabase;
   backend: SyncBackend;
   userId: string;
   tables: string[];

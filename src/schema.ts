@@ -1,5 +1,6 @@
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { metadataSql, triggerSql, type TriggerSqlOptions } from "./sql";
+import type { AsyncDatabase } from "./types";
 
 export interface SyncTableConfig extends TriggerSqlOptions {
   name: string;
@@ -21,6 +22,7 @@ export function syncTable(
   table: string | SQLiteTable,
   options: Omit<SyncTableConfig, "name" | "columns"> & { columns?: string[] } = {},
 ): SyncTableConfig {
+  // @ts-expect-error symbol access
   const name = typeof table === "string" ? table : ((table[Symbol.for("drizzle:Name")] as string) ?? "");
   const inferred = typeof table === "string" ? [] : inferColumnsFromDrizzle(table);
   const columns = (options.columns && options.columns.length > 0 ? options.columns : inferred).filter(
@@ -41,15 +43,15 @@ export function syncTable(
 }
 
 export interface InstallSyncOptions {
-  db: Database;
+  db: AsyncDatabase;
   tables: SyncTableConfig[];
 }
 
-export function installSync(options: InstallSyncOptions) {
-  for (const sql of metadataSql()) options.db.exec(sql);
+export async function installSync(options: InstallSyncOptions) {
+  for (const sql of metadataSql()) await options.db.exec(sql);
   for (const table of options.tables) {
     for (const sql of triggerSql(table.name, table.columns, table)) {
-      options.db.exec(sql);
+      await options.db.exec(sql);
     }
   }
 }

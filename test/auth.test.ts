@@ -9,7 +9,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 async function runAdapter(
-  adapter: (context: Parameters<ReturnType<typeof Hono>["request"]>[0] extends never ? never : any) => unknown,
+  adapter: (context: any) => unknown,
   headers: Record<string, string> = {},
 ) {
   const app = new Hono();
