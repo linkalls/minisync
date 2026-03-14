@@ -120,8 +120,26 @@ export class SyncClient {
     let lastSeq = -1;
 
     while (true) {
-      const queued = this.readQueuedChanges(batchSize, lastSeq);
+      let queued = this.readQueuedChanges(batchSize, lastSeq);
       if (queued.length === 0) break;
+
+      const latestSeqMap = new Map<string, number>();
+      for (const row of queued) {
+        latestSeqMap.set(`${row.table_name}:${row.row_id}`, row.seq);
+      }
+
+      const redundantRows = queued.filter((row) => latestSeqMap.get(`${row.table_name}:${row.row_id}`) !== row.seq);
+      if (redundantRows.length > 0) {
+        this.options.db.transaction(() => {
+          this.acknowledgeQueuedRows(redundantRows);
+        })();
+        queued = queued.filter((row) => latestSeqMap.get(`${row.table_name}:${row.row_id}`) === row.seq);
+      }
+
+      if (queued.length === 0) {
+        lastSeq = redundantRows[redundantRows.length - 1]?.seq ?? lastSeq;
+        continue;
+      }
 
       this.lockQueuedRows(queued);
       try {
@@ -221,10 +239,15 @@ export class SyncClient {
       });
 
       this.options.db.transaction(() => {
-        for (const change of response.changes) {
-          this.applyRemoteChange(change);
+        try {
+          this.setState("is_syncing", "1");
+          for (const change of response.changes) {
+            this.applyRemoteChange(change);
+          }
+          this.setState("checkpoint", response.checkpoint);
+        } finally {
+          this.setState("is_syncing", "0");
         }
-        this.setState("checkpoint", response.checkpoint);
       })();
 
       totalPulled += response.changes.length;
