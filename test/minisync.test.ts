@@ -259,6 +259,78 @@ describe("SQLite queue + sync client", () => {
     expect(row.dead_lettered).toBe(1);
   });
 
+  test("pulls data in batches and respects limits", async () => {
+    const localDb = new Database(":memory:");
+    localDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    setupSync(localDb, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+
+    const remoteDb = new Database(":memory:");
+    const backend = new SqliteSyncBackend({ db: remoteDb });
+    backend.init();
+
+    const changes = Array.from({ length: 5 }, (_, i) => ({
+      table: "notes",
+      op: "upsert" as const,
+      row: {
+        id: `n${i}`,
+        userId: "u1",
+        data: { id: `n${i}`, user_id: "u1", title: `title ${i}` },
+        hlc: nextHlc({ nowMs: i, nodeId: "srv" }),
+        deleted: false,
+      },
+    }));
+
+    await backend.pushChanges({
+      userId: "u1",
+      changes,
+    });
+
+    const client = createSyncClient({
+      db: localDb,
+      backend,
+      userId: "u1",
+      tables: ["notes"],
+      batchSize: 2, // Pagination by 2
+    });
+
+    const pulled = await client.pull();
+    expect(pulled).toBe(5);
+
+    const rowCount = localDb.query("SELECT COUNT(*) as count FROM notes").get() as { count: number };
+    expect(rowCount.count).toBe(5);
+  });
+
+  test("pushes data in batches", async () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    for (const sql of metadataSql()) db.exec(sql);
+    for (const sql of triggerSql("notes", ["id", "user_id", "title"])) db.exec(sql);
+
+    for (let i = 0; i < 5; i++) {
+      db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run(`n${i}`, "u1", `hello ${i}`);
+    }
+
+    let pushRequests = 0;
+    const backend = new MemorySyncBackend();
+    const originalPush = backend.pushChanges.bind(backend);
+    backend.pushChanges = async (req) => {
+      pushRequests++;
+      return originalPush(req);
+    };
+
+    const client = createSyncClient({
+      db,
+      backend,
+      userId: "u1",
+      tables: ["notes"],
+      batchSize: 2, // Batch push
+    });
+
+    const pushed = await client.push();
+    expect(pushed).toBe(5);
+    expect(pushRequests).toBe(3); // 2 + 2 + 1 = 5
+  });
+
   test("rejects ownership mismatch", async () => {
     const backend = new MemorySyncBackend();
     await expect(

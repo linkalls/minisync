@@ -33,12 +33,28 @@ export class SqliteSyncBackend implements SyncBackend {
 
   async pullChanges(request: PullRequest): Promise<PullResponse> {
     const table = quoteIdentifier(this.changesTable);
-    const rows = this.options.db
-      .query(`SELECT checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload FROM ${table} WHERE user_id = ?1 AND (?2 IS NULL OR checkpoint > ?2) ORDER BY checkpoint ASC`)
-      .all(request.userId, request.checkpoint ?? null) as StoredChangeRow[];
+    let queryStr = `SELECT checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload FROM ${table} WHERE user_id = ?1 AND (?2 IS NULL OR checkpoint > ?2)`;
+    const params: unknown[] = [request.userId, request.checkpoint ?? null];
 
-    const changes = rows
-      .filter((row) => !request.tables || request.tables.includes(row.table_name))
+    if (request.tables && request.tables.length > 0) {
+      const placeholders = request.tables.map(() => "?").join(", ");
+      queryStr += ` AND table_name IN (${placeholders})`;
+      params.push(...request.tables);
+    }
+
+    queryStr += ` ORDER BY checkpoint ASC`;
+
+    const limit = request.limit ?? 100;
+    queryStr += ` LIMIT ${limit + 1}`;
+
+    const rows = this.options.db
+      .query(queryStr)
+      .all(...params) as StoredChangeRow[];
+
+    const hasMore = rows.length > limit;
+    const resultRows = hasMore ? rows.slice(0, limit) : rows;
+
+    const changes = resultRows
       .map((row) => ({
         table: row.table_name,
         op: row.op,
@@ -51,8 +67,8 @@ export class SqliteSyncBackend implements SyncBackend {
         },
       } satisfies SyncChange));
 
-    const latest = rows.at(-1)?.checkpoint ?? request.checkpoint ?? "";
-    return { checkpoint: latest, changes };
+    const latest = resultRows.at(-1)?.checkpoint ?? request.checkpoint ?? "";
+    return { checkpoint: latest, changes, hasMore };
   }
 
   async pushChanges(request: PushRequest): Promise<PushResponse> {

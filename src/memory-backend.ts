@@ -18,9 +18,17 @@ export class MemorySyncBackend implements SyncBackend {
       if (!request.checkpoint) return true;
       return change.checkpoint > request.checkpoint;
     });
+
+    const limit = request.limit ?? 100;
+    const hasMore = filtered.length > limit;
+    const resultChanges = hasMore ? filtered.slice(0, limit) : filtered;
+
+    const checkpoint = resultChanges.length > 0 ? resultChanges[resultChanges.length - 1].checkpoint : (request.checkpoint ?? "");
+
     return {
-      checkpoint: this.lastCheckpoint,
-      changes: filtered,
+      checkpoint,
+      changes: resultChanges,
+      hasMore,
     };
   }
 
