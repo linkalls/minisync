@@ -1,10 +1,10 @@
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { createSyncClient, type SyncClient } from "./client";
 import { installSync, syncTable } from "./schema";
-import type { SyncBackend, SyncClientOptions } from "./types";
+import type { AsyncDatabase, SyncBackend, SyncClientOptions } from "./types";
 
 export interface CreateDrizzleSyncClientOptions {
-  db: Database;
+  db: AsyncDatabase;
   backend: SyncBackend;
   userId: string;
   schema: SQLiteTable[];
@@ -18,10 +18,10 @@ export interface CreateDrizzleSyncClientOptions {
   onError?: SyncClientOptions["onError"];
 }
 
-export function createDrizzleSyncClient(options: CreateDrizzleSyncClientOptions): SyncClient {
+export async function createDrizzleSyncClient(options: CreateDrizzleSyncClientOptions): Promise<SyncClient> {
   const tables = options.schema.map((table) => syncTable(table));
   if (options.autoInstall ?? true) {
-    installSync({
+    await installSync({
       db: options.db,
       tables,
     });

@@ -9,9 +9,9 @@ describe("supabase backend", () => {
         async rpc(fn, args) {
           calls.push({ fn, args });
           if (fn === "minisync_pull") {
-            return { data: { checkpoint: "c1", changes: [] }, error: null };
+            return { data: { checkpoint: "c1", changes: [] } as any, error: null };
           }
-          return { data: { accepted: 1, checkpoint: "c2", acknowledgedIds: ["notes:n1"] }, error: null };
+          return { data: { accepted: 1, checkpoint: "c2", acknowledgedIds: ["notes:n1"] } as any, error: null };
         },
       },
     });

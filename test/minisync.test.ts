@@ -18,6 +18,7 @@ import {
   SqliteSyncBackend,
   syncTable,
   triggerSql,
+  bunSqliteAdapter,
 } from "../src";
 
 describe("HLC", () => {
@@ -52,45 +53,49 @@ describe("schema helpers", () => {
     expect(table.deletedAtColumn).toBe("deleted_at");
   });
 
-  test("installSync uses high-level table configs", () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    installSync({ db, tables: [syncTable("notes", { columns: ["id", "user_id", "title"] })] });
-    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
-    expect(inspectQueue(db)).toHaveLength(1);
+  test("installSync uses high-level table configs", async () => {
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const db = bunSqliteAdapter(rawDb);
+    await installSync({ db, tables: [syncTable("notes", { columns: ["id", "user_id", "title"] })] });
+    rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+    expect(await inspectQueue(db)).toHaveLength(1);
   });
 });
 
 describe("SQLite queue + sync client", () => {
-  test("setupSync installs metadata and triggers", () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+  test("setupSync installs metadata and triggers", async () => {
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const db = bunSqliteAdapter(rawDb);
+    await setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
 
-    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+    rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
 
-    const queue = inspectQueue(db);
+    const queue = await inspectQueue(db);
     expect(queue).toHaveLength(1);
     expect(queue[0]?.table_name).toBe("notes");
   });
 
-  test("supports soft delete trigger mode", () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, deleted_at TEXT)");
-    setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title", "deleted_at"], deletedAtColumn: "deleted_at" }]);
+  test("supports soft delete trigger mode", async () => {
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, deleted_at TEXT)");
+    const db = bunSqliteAdapter(rawDb);
+    await setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title", "deleted_at"], deletedAtColumn: "deleted_at" }]);
 
-    db.query("INSERT INTO notes (id, user_id, title, deleted_at) VALUES (?1, ?2, ?3, NULL)").run("n1", "u1", "hello");
-    db.query("UPDATE notes SET deleted_at = ?2 WHERE id = ?1").run("n1", "2026-03-13T14:00:00Z");
+    rawDb.query("INSERT INTO notes (id, user_id, title, deleted_at) VALUES (?1, ?2, ?3, NULL)").run("n1", "u1", "hello");
+    rawDb.query("UPDATE notes SET deleted_at = ?2 WHERE id = ?1").run("n1", "2026-03-13T14:00:00Z");
 
-    const queue = inspectQueue(db);
+    const queue = await inspectQueue(db);
     expect(queue.some((entry) => entry.op === "delete")).toBe(true);
   });
 
   test("tracks local writes and pushes them", async () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    for (const sql of metadataSql()) db.exec(sql);
-    for (const sql of triggerSql("notes", ["id", "user_id", "title"])) db.exec(sql);
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    for (const sql of metadataSql()) rawDb.exec(sql);
+    for (const sql of triggerSql("notes", ["id", "user_id", "title"])) rawDb.exec(sql);
+    const db = bunSqliteAdapter(rawDb);
 
     const events: string[] = [];
     const backend = new MemorySyncBackend();
@@ -102,22 +107,24 @@ describe("SQLite queue + sync client", () => {
       onSyncStart: () => events.push("start"),
       onSyncSuccess: () => events.push("success"),
     });
-    client.start();
+    await client.start();
 
-    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+    rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
 
     const result = await client.syncNow();
     expect(result.pushed).toBe(1);
     expect(result.pulled).toBe(0);
     expect(events).toEqual(["start", "success"]);
-    expect(inspectState(db).checkpoint.length).toBeGreaterThan(0);
+    const state = await inspectState(db);
+    expect(state.checkpoint.length).toBeGreaterThan(0);
   });
 
   test("releases queue lock and increments attempts on push failure", async () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
-    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const db = bunSqliteAdapter(rawDb);
+    await setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+    rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
 
     const client = createSyncClient({
       db,
@@ -132,10 +139,10 @@ describe("SQLite queue + sync client", () => {
       userId: "u1",
       tables: ["notes"],
     });
-    client.start();
+    await client.start();
 
     await expect(client.push()).rejects.toThrow("boom");
-    const row = db.query("SELECT attempts, locked, last_error FROM _sync_queue LIMIT 1").get() as {
+    const row = rawDb.query("SELECT attempts, locked, last_error FROM _sync_queue LIMIT 1").get() as {
       attempts: number;
       locked: number;
       last_error: string;
@@ -146,13 +153,14 @@ describe("SQLite queue + sync client", () => {
   });
 
   test("applies pulled rows into local sqlite", async () => {
-    const localDb = new Database(":memory:");
-    localDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    setupSync(localDb, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+    const rawLocalDb = new Database(":memory:");
+    rawLocalDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const localDb = bunSqliteAdapter(rawLocalDb);
+    await setupSync(localDb, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
 
     const remoteDb = new Database(":memory:");
-    const backend = new SqliteSyncBackend({ db: remoteDb });
-    backend.init();
+    const backend = new SqliteSyncBackend({ db: bunSqliteAdapter(remoteDb) });
+    await backend.init();
 
     await backend.pushChanges({
       userId: "u1",
@@ -166,11 +174,11 @@ describe("SQLite queue + sync client", () => {
     });
 
     const client = createSyncClient({ db: localDb, backend, userId: "u1", tables: ["notes"] });
-    client.start();
+    await client.start();
     const pulled = await client.pull();
     expect(pulled).toBe(1);
 
-    const row = localDb.query("SELECT id, user_id, title FROM notes WHERE id = ?1").get("n2") as { id: string; user_id: string; title: string } | null;
+    const row = rawLocalDb.query("SELECT id, user_id, title FROM notes WHERE id = ?1").get("n2") as { id: string; user_id: string; title: string } | null;
     expect(row).toEqual({ id: "n2", user_id: "u1", title: "remote" });
   });
 
@@ -199,7 +207,7 @@ describe("SQLite queue + sync client", () => {
     const http = new HttpSyncBackend({
       baseUrl: "http://sync.test",
       headers: { authorization: "Bearer u1" },
-      fetch: (input, init) => app.request(input, init),
+      fetch: ((input: any, init: any) => app.request(input, init)) as any,
     });
 
     const pushed = await http.pushChanges({
@@ -223,17 +231,18 @@ describe("SQLite queue + sync client", () => {
     const app = createSyncServer({ backend: new MemorySyncBackend(), auth: () => null });
     const http = new HttpSyncBackend({
       baseUrl: "http://sync.test",
-      fetch: (input, init) => app.request(input, init),
+      fetch: ((input: any, init: any) => app.request(input, init)) as any,
     });
 
     await expect(http.pullChanges({ userId: "u1", tables: ["notes"] })).rejects.toThrow("401");
   });
 
   test("dead-letters queue rows after repeated failures", async () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
-    db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const db = bunSqliteAdapter(rawDb);
+    await setupSync(db, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+    rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run("n1", "u1", "hello");
 
     const client = createSyncClient({
       db,
@@ -248,25 +257,26 @@ describe("SQLite queue + sync client", () => {
       userId: "u1",
       tables: ["notes"],
     });
-    client.start();
+    await client.start();
 
     for (let i = 0; i < 10; i++) {
       await expect(client.push()).rejects.toThrow("boom");
     }
 
-    const row = db.query("SELECT attempts, dead_lettered FROM _sync_queue LIMIT 1").get() as { attempts: number; dead_lettered: number };
+    const row = rawDb.query("SELECT attempts, dead_lettered FROM _sync_queue LIMIT 1").get() as { attempts: number; dead_lettered: number };
     expect(row.attempts).toBe(10);
     expect(row.dead_lettered).toBe(1);
   });
 
   test("pulls data in batches and respects limits", async () => {
-    const localDb = new Database(":memory:");
-    localDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    setupSync(localDb, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
+    const rawLocalDb = new Database(":memory:");
+    rawLocalDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    const localDb = bunSqliteAdapter(rawLocalDb);
+    await setupSync(localDb, [{ name: "notes", columns: ["id", "user_id", "title"] }]);
 
     const remoteDb = new Database(":memory:");
-    const backend = new SqliteSyncBackend({ db: remoteDb });
-    backend.init();
+    const backend = new SqliteSyncBackend({ db: bunSqliteAdapter(remoteDb) });
+    await backend.init();
 
     const changes = Array.from({ length: 5 }, (_, i) => ({
       table: "notes",
@@ -296,18 +306,19 @@ describe("SQLite queue + sync client", () => {
     const pulled = await client.pull();
     expect(pulled).toBe(5);
 
-    const rowCount = localDb.query("SELECT COUNT(*) as count FROM notes").get() as { count: number };
+    const rowCount = rawLocalDb.query("SELECT COUNT(*) as count FROM notes").get() as { count: number };
     expect(rowCount.count).toBe(5);
   });
 
   test("pushes data in batches", async () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
-    for (const sql of metadataSql()) db.exec(sql);
-    for (const sql of triggerSql("notes", ["id", "user_id", "title"])) db.exec(sql);
+    const rawDb = new Database(":memory:");
+    rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+    for (const sql of metadataSql()) rawDb.exec(sql);
+    for (const sql of triggerSql("notes", ["id", "user_id", "title"])) rawDb.exec(sql);
+    const db = bunSqliteAdapter(rawDb);
 
     for (let i = 0; i < 5; i++) {
-      db.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run(`n${i}`, "u1", `hello ${i}`);
+      rawDb.query("INSERT INTO notes (id, user_id, title) VALUES (?1, ?2, ?3)").run(`n${i}`, "u1", `hello ${i}`);
     }
 
     let pushRequests = 0;

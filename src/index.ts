@@ -20,3 +20,4 @@ export * from "./postgres";
 export * from "./supabase";
 export * from "./errors";
 export * from "./utils";
+export * from "./sqlite-adapter";
