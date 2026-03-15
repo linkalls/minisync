@@ -22,9 +22,17 @@ interface StoredChangeRow {
 
 export class SqliteSyncBackend implements SyncBackend {
   private readonly changesTable: string;
+  private initialized = false;
 
   constructor(private readonly options: SqliteBackendOptions) {
     this.changesTable = options.changesTable ?? "_remote_changes";
+  }
+
+  private async ensureInit() {
+    if (!this.initialized) {
+      await this.init();
+      this.initialized = true;
+    }
   }
 
   async init() {
@@ -34,6 +42,7 @@ export class SqliteSyncBackend implements SyncBackend {
   }
 
   async pullChanges(request: PullRequest): Promise<PullResponse> {
+    await this.ensureInit();
     const table = quoteIdentifier(this.changesTable);
     let queryStr = `SELECT checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload FROM ${table} WHERE user_id = ?1 AND (?2 IS NULL OR checkpoint > ?2)`;
     const params: unknown[] = [request.userId, request.checkpoint ?? null];
@@ -72,7 +81,7 @@ export class SqliteSyncBackend implements SyncBackend {
   }
 
   async pushChanges(request: PushRequest): Promise<PushResponse> {
-    await this.init();
+    await this.ensureInit();
     const table = quoteIdentifier(this.changesTable);
     let accepted = 0;
     let latest = "";
