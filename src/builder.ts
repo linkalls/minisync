@@ -1,7 +1,7 @@
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { createSyncClient, type SyncClient } from "./client";
 import { installSync, syncTable } from "./schema";
-import { bunSqliteAdapter } from "./sqlite-adapter";
+import { bunSqliteAdapter } from "./adapters/bun-sqlite";
 import type { AsyncDatabase, SyncBackend, SyncClientOptions } from "./types";
 
 /** Detect whether `db` is a raw Bun SQLite `Database` (has `.prepare`) rather than an `AsyncDatabase`. */
