@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
-import { createDrizzleSyncClient, HttpSyncBackend } from "../src";
+import { createDrizzleSyncClient, SqliteSyncBackend, bunSqliteAdapter } from "../src";
 
 // Setup Drizzle Schema
 const cards = sqliteTable("cards", {
@@ -15,23 +15,25 @@ const db = new Database("client.db");
 
 const USER_ID = "user-123";
 
-// Create client
-const syncClient = createDrizzleSyncClient({
-  db,
-  userId: USER_ID,
-  schema: [cards],
-  autoStart: false,
-  backend: new HttpSyncBackend({
-    baseUrl: "http://localhost:3000/sync"
-  })
-});
-
-syncClient.init();
-db.exec("DELETE FROM cards"); // reset
-db.exec("DELETE FROM _sync_queue"); // reset
-db.exec("DELETE FROM _sync_state"); // reset
-
 async function runTests() {
+  const serverDb = new Database("server.db");
+  const serverBackend = new SqliteSyncBackend({ db: bunSqliteAdapter(serverDb) });
+  await serverBackend.init();
+
+  // Create client
+  const syncClient = await createDrizzleSyncClient({
+    db: bunSqliteAdapter(db),
+    userId: USER_ID,
+    schema: [cards],
+    autoStart: false,
+    backend: serverBackend
+  });
+
+  await syncClient.init();
+  db.exec("DELETE FROM cards"); // reset
+  db.exec("DELETE FROM _sync_queue"); // reset
+  db.exec("DELETE FROM _sync_state"); // reset
+
   console.log("Running offline compaction and echo-back tests...");
 
   console.log("=== Testing Compaction ===");
@@ -62,7 +64,6 @@ async function runTests() {
 
   console.log("=== Testing Echo-back ===");
   // Simulate another client inserting a record directly into the server db
-  const serverDb = new Database("server.db");
   const remoteHlc = new Date().toISOString(); // dummy HLC
   serverDb.exec("INSERT INTO _remote_changes (checkpoint, table_name, op, row_id, user_id, hlc, deleted, payload) VALUES (?, 'cards', 'upsert', 'c2', 'user-123', ?, 0, '{\"id\":\"c2\",\"user_id\":\"user-123\",\"title\":\"card 2\",\"revisions\":1}')", remoteHlc, remoteHlc);
 
