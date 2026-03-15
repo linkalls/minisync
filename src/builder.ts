@@ -1,17 +1,8 @@
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { createSyncClient, type SyncClient } from "./client";
 import { installSync, syncTable } from "./schema";
-import { bunSqliteAdapter } from "./adapters/bun-sqlite";
+import { normalizeToAsyncDb } from "./utils";
 import type { AsyncDatabase, SyncBackend, SyncClientOptions } from "./types";
-
-/** Detect whether `db` is a raw Bun SQLite `Database` (has `.prepare`) rather than an `AsyncDatabase`. */
-function normalizeDb(db: AsyncDatabase | object): AsyncDatabase {
-  if ("prepare" in db && typeof (db as { prepare: unknown }).prepare === "function") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return bunSqliteAdapter(db as any);
-  }
-  return db as AsyncDatabase;
-}
 
 export interface CreateDrizzleSyncClientOptions {
   /**
@@ -34,7 +25,7 @@ export interface CreateDrizzleSyncClientOptions {
 }
 
 export async function createDrizzleSyncClient(options: CreateDrizzleSyncClientOptions): Promise<SyncClient> {
-  const db = normalizeDb(options.db);
+  const db = normalizeToAsyncDb(options.db);
   const tables = options.schema.map((table) => syncTable(table));
   if (options.autoInstall ?? true) {
     await installSync({

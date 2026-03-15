@@ -1,17 +1,8 @@
 import type { AuthAdapter } from "./auth";
 import type { AsyncDatabase } from "./types";
-import { bunSqliteAdapter } from "./adapters/bun-sqlite";
+import { normalizeToAsyncDb } from "./utils";
 import { SqliteSyncBackend } from "./sqlite-backend";
 import { createSyncServer } from "./server";
-
-/** Detect whether `db` is a raw Bun SQLite `Database` rather than an `AsyncDatabase`. */
-function normalizeDb(db: AsyncDatabase | object): AsyncDatabase {
-  if ("prepare" in db && typeof (db as { prepare: unknown }).prepare === "function") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return bunSqliteAdapter(db as any);
-  }
-  return db as AsyncDatabase;
-}
 
 export interface CreateDrizzleSyncServerOptions {
   /**
@@ -61,7 +52,7 @@ export interface CreateDrizzleSyncServerOptions {
  * ```
  */
 export async function createDrizzleSyncServer(options: CreateDrizzleSyncServerOptions) {
-  const db = normalizeDb(options.db);
+  const db = normalizeToAsyncDb(options.db);
   const backend = new SqliteSyncBackend({ db, changesTable: options.changesTable });
   // ensureInit is called lazily inside SqliteSyncBackend, but calling it here
   // surfaces schema errors at startup time rather than on the first request.

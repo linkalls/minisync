@@ -268,7 +268,7 @@ describe("libsqlAdapter", () => {
   test("SqliteSyncBackend auto-initializes on first pull (no manual init needed)", async () => {
     const { SqliteSyncBackend } = await import("../src");
     const rawDb = new Database(":memory:");
-    const backend = new SqliteSyncBackend({ db: { ...bunSqliteAdapterFrom(rawDb) } });
+    const backend = new SqliteSyncBackend({ db: bunSqliteAdapterFrom(rawDb) });
     // Calling pullChanges without init() should NOT throw
     const result = await backend.pullChanges({ userId: "u1" });
     expect(result.changes).toHaveLength(0);
