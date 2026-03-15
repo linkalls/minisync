@@ -1,5 +1,5 @@
+import { createDrizzleSyncServer, authJsAuth } from "../src";
 import { Database } from "bun:sqlite";
-import { authJsAuth, createSyncServer, SqliteSyncBackend, type SyncBackend } from "../src";
 
 async function getSessionFromYourApp(_context: unknown) {
   return {
@@ -9,12 +9,10 @@ async function getSessionFromYourApp(_context: unknown) {
 }
 
 const db = new Database("sync.db");
-const backend: SyncBackend = new SqliteSyncBackend({ db });
-(db as Database).exec("pragma journal_mode = wal");
-(backend as SqliteSyncBackend).init();
+db.exec("pragma journal_mode = wal");
 
-export default createSyncServer({
-  backend,
+export default await createDrizzleSyncServer({
+  db,
   auth: authJsAuth({
     getSession: async (c) => getSessionFromYourApp(c),
   }),

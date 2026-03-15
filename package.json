@@ -9,7 +9,8 @@
     "./better-sqlite3": "./src/adapters/better-sqlite3.ts",
     "./node-sqlite": "./src/adapters/node-sqlite.ts",
     "./deno-sqlite": "./src/adapters/deno-sqlite.ts",
-    "./libsql": "./src/adapters/libsql.ts"
+    "./libsql": "./src/adapters/libsql.ts",
+    "./sqlite-core": "./src/sqlite-schema.ts"
   },
   "scripts": {
     "test": "bun test"
