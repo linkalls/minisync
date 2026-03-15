@@ -1,34 +1,42 @@
 # minisync
 
-Drizzle-first local-first sync engine for SQLite apps.
+A local-first sync engine for SQLite apps — Drizzle-friendly, auth-agnostic, and self-hostable.
 
 `minisync` is for apps that:
-- write to local SQLite first
-- work offline
-- sync later with your server
-- want OSS sync infra instead of a hosted lock-in product
+- write to a local SQLite database first
+- work fully offline
+- sync later when the server is reachable
+- want open-source sync infrastructure instead of a hosted lock-in product
 
 ---
 
-## いちばん理想の使い方
+## Quickstart
 
-**既存の Auth.js 入りサーバーに、sync route を1個足すだけ。**
-クライアント側は **Drizzle schema を渡すだけ** に近づけてある。
+### 1. Install
 
----
+```bash
+bun add minisync
+```
 
-## 今のおすすめ導線
-
-### client
+### 2. Client
 
 ```ts
 import { Database } from "bun:sqlite";
 import { sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { createDrizzleSyncClient, HttpSyncBackend } from "minisync";
 
+// Your local database
 const db = new Database("app.db");
-db.exec("create table if not exists notes (id text primary key, user_id text not null, title text not null, deleted_at text)");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    deleted_at TEXT
+  )
+`);
 
+// Your Drizzle schema
 const notes = sqliteTable("notes", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
@@ -36,44 +44,35 @@ const notes = sqliteTable("notes", {
   deletedAt: text("deleted_at"),
 });
 
-const session = { user: { id: "u1" } };
-const token = "your-auth-token";
-
-const sync = createDrizzleSyncClient({
+// Pass the raw Bun Database directly — it's adapted automatically.
+// Sync triggers and metadata tables are installed on first call.
+const sync = await createDrizzleSyncClient({
   db,
   backend: new HttpSyncBackend({
     baseUrl: "https://api.example.com/api/sync",
-    headers: {
-      authorization: `Bearer ${token}`,
-    },
+    headers: { authorization: `Bearer ${yourToken}` },
   }),
-  userId: session.user.id,
+  userId: currentUser.id,
   schema: [notes],
-  intervalMs: 5000,
+  intervalMs: 5000,   // background sync every 5 s
   autoStart: true,
 });
 
+// Trigger a manual sync at any time:
 await sync.syncNow();
 ```
 
-これで:
-- `installSync(...)` を手で呼ばなくていい
-- `tables: ["notes"]` を別で書かなくていい
-- Drizzle schema から同期対象を解決する
-
----
-
-### server (Auth.js / Next.js route)
+### 3. Server (Next.js App Router)
 
 ```ts
 // app/api/sync/[action]/route.ts
 import { auth } from "@/auth";
-import { createSyncRouteHandlers, resolveAuthJsIdentity, SqliteSyncBackend } from "minisync";
+import { bunSqliteAdapter, createSyncRouteHandlers, resolveAuthJsIdentity, SqliteSyncBackend } from "minisync";
 import { Database } from "bun:sqlite";
 
-const db = new Database("sync.db");
-const backend = new SqliteSyncBackend({ db });
-backend.init();
+const rawDb = new Database("sync.db");
+// SqliteSyncBackend initializes its own schema automatically — no .init() call needed.
+const backend = new SqliteSyncBackend({ db: bunSqliteAdapter(rawDb) });
 
 export const { POST } = createSyncRouteHandlers({
   backend,
@@ -81,143 +80,128 @@ export const { POST } = createSyncRouteHandlers({
 });
 ```
 
-これが今の **一番おすすめの導線**。
+---
+
+## Runtime support
+
+minisync works with all major SQLite runtimes via adapter functions:
+
+| runtime | adapter | driver |
+|---------|---------|--------|
+| **Bun** | `bunSqliteAdapter` | `bun:sqlite` (built-in) |
+| **Node.js** | `betterSqlite3Adapter` | `better-sqlite3` |
+| **Node.js 22.5+** | `nodeSqliteAdapter` | `node:sqlite` (built-in) |
+| **Deno** | `denoSqliteAdapter` | `@db/sqlite` |
+| **Turso / libsql** | `libsqlAdapter` | `@libsql/client` |
+
+See [docs/adapters.md](./docs/adapters.md) for full usage examples.
 
 ---
 
-## 低レベルAPIもある
+## How it works
 
-必要なら細かく組むこともできる。
+1. SQL triggers (installed by `createDrizzleSyncClient`) capture every insert / update / delete into a `_sync_queue` table.
+2. `syncNow()` **pushes** queued local changes to the server, then **pulls** any new remote changes.
+3. Conflicts are resolved with **Last-Write-Wins** using a [Hybrid Logical Clock](./docs/concepts.md#hybrid-logical-clock-hlc).
+4. Remote changes are applied inside a transaction while `is_syncing = 1` to avoid re-queueing them.
 
-### setup を明示したい場合
+---
+
+## Backends
+
+| backend | best for |
+|---------|----------|
+| `SqliteSyncBackend` | dev, testing, small self-hosted servers |
+| `PostgresSyncBackend` | standard self-hosted production servers |
+| `SupabaseSyncBackend` | Supabase-hosted projects |
+| `MemorySyncBackend` | unit tests |
+| custom `SyncBackend` | any storage layer |
+
+See [docs/backends.md](./docs/backends.md) for details.
+
+---
+
+## Auth adapters
+
+minisync ships ready-to-use auth adapters for the most common stacks:
+
+| adapter | use case |
+|---------|----------|
+| `resolveAuthJsIdentity` | Next.js / Auth.js route handlers |
+| `jwtClaimsAuth` | JWT Bearer tokens (Hono server) |
+| `clerkAuth` | Clerk (Hono server) |
+| `bearerTokenAuth` | custom token lookup (Hono server) |
+| `chainAuth` | try multiple adapters in order |
+
+See [docs/auth.md](./docs/auth.md) for details.
+
+---
+
+## Docs
+
+- [Getting started](./docs/getting-started.md) — step-by-step setup guide
+- [Concepts](./docs/concepts.md) — HLC, conflict resolution, sync protocol
+- [Adapters](./docs/adapters.md) — Bun, Node.js, Deno, libsql/Turso
+- [Backends](./docs/backends.md) — all backend options with examples
+- [Auth](./docs/auth.md) — all auth adapters with examples
+- [API reference](./docs/api.md) — complete TypeScript API
+
+---
+
+## Examples
+
+| file | description |
+|------|-------------|
+| `examples/drizzle-client.ts` | Recommended client setup |
+| `examples/next-authjs-route.ts` | Auth.js + Next.js App Router server |
+| `examples/http-server.ts` | Standalone Hono server |
+| `examples/supabase.ts` | Supabase backend |
+
+---
+
+## Low-level API
+
+For advanced use cases you can compose the primitives directly:
 
 ```ts
-installSync({
+import { Database } from "bun:sqlite";
+import { bunSqliteAdapter, installSync, syncTable, createSyncClient, MemorySyncBackend } from "minisync";
+
+const rawDb = new Database("app.db");
+rawDb.exec("CREATE TABLE notes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL)");
+
+const db = bunSqliteAdapter(rawDb);
+
+// 1. Install metadata tables and triggers manually
+await installSync({
   db,
-  tables: [syncTable(notes)],
+  tables: [syncTable("notes", { columns: ["id", "user_id", "title"] })],
 });
-```
 
-### client を明示したい場合
-
-```ts
-createSyncClient({
+// 2. Create the low-level client
+const client = createSyncClient({
   db,
-  backend,
-  userId,
+  backend: new MemorySyncBackend(),
+  userId: "u1",
   tables: ["notes"],
 });
-```
 
-でも、基本は **`createDrizzleSyncClient(...)` をおすすめ**。
-
----
-
-## Auth.js をどう考えてる？
-
-`minisync` は Auth.js の独自流儀を作らない。
-
-やることはこれだけ:
-- 既存の `auth()` や session resolver を呼ぶ
-- `userId` を取り出す
-- sync request に流す
-
-つまり、**Auth.js 既存サーバーに後付けしやすい** ことを重視してる。
-
-### 推奨 helper
-
-```ts
-import { resolveAuthJsIdentity } from "minisync";
-
-const resolveIdentity = resolveAuthJsIdentity({ auth });
+await client.start();
+await client.syncNow();
 ```
 
 ---
 
-## ほかの auth も使える
-
-### Auth.js helper
-
-```ts
-import { resolveAuthJsIdentity } from "minisync";
-
-const resolveIdentity = resolveAuthJsIdentity({ auth });
-```
-
-### Clerk
-
-```ts
-import { clerkAuth } from "minisync";
-
-const auth = clerkAuth();
-```
-
-### JWT
-
-```ts
-import { jwtClaimsAuth } from "minisync";
-
-const auth = jwtClaimsAuth();
-```
-
-### custom
-
-```ts
-import { bearerTokenAuth } from "minisync";
-
-const auth = bearerTokenAuth({
-  resolve: async (token) => ({ userId: token }),
-});
-```
-
----
-
-## route handler 方式と server helper 方式
-
-### 1. route handler に埋め込む（おすすめ）
-既存のサーバーに足しやすい。
-
-- `createSyncRouteHandlers(...)`
-- `handleSyncRequest(...)`
-- `resolveAuthJsIdentity(...)`
-
-### 2. Hono helper を使う
-新規に sync サーバーを切りたいとき向け。
-
-- `createSyncServer(...)`
-
-でも基本は **埋め込み型 route handler** をおすすめする。
-
----
-
-## backend は何がある？
-
-### `SqliteSyncBackend`
-- 一番軽い
-- ローカル検証 / dev / 小さめ self-host 向け
-
-### `PostgresSyncBackend`
-- 汎用 Postgres scaffold
-- 自前サーバーで SQL executor を差し込む形
-
-### `SupabaseSyncBackend`
-- Supabase RPC ベース
-- `supabaseSqlSetup()` で SQL scaffold を出せる
-
----
-
-## examples
-
-- `examples/drizzle-client.ts` → 今のおすすめ client 例
-- `examples/next-authjs-route.ts` → 既存 Auth.js サーバーに route を足す例
-- `examples/http-server.ts` → standalone server helper example
-- `examples/supabase.ts` → Supabase backend example
-
----
-
-## 開発
+## Development
 
 ```bash
 bun install
 bun test
 ```
+
+---
+
+## License
+
+MIT
+

@@ -15,7 +15,8 @@ const notes = sqliteTable("notes", {
 const session = { user: { id: "u1" } };
 const token = "your-auth-token";
 
-const sync = createDrizzleSyncClient({
+// Pass the raw Bun Database directly — createDrizzleSyncClient wraps it automatically.
+const sync = await createDrizzleSyncClient({
   db,
   backend: new HttpSyncBackend({
     baseUrl: "http://localhost:3000/api/sync",

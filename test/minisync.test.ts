@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { sqliteTable, text } from "drizzle-orm/sqlite-core";
 import {
   compareHlc,
+  createDrizzleSyncServer,
   createSyncClient,
   createSyncServer,
   defineDrizzleSyncTable,
@@ -13,6 +14,7 @@ import {
   MemorySyncBackend,
   metadataSql,
   nextHlc,
+  remoteChangesTable,
   resolveLww,
   setupSync,
   SqliteSyncBackend,
@@ -356,5 +358,79 @@ describe("SQLite queue + sync client", () => {
         ],
       }),
     ).rejects.toThrow("ownership mismatch");
+  });
+});
+
+describe("createDrizzleSyncServer", () => {
+  test("auto-wraps a raw Bun Database and creates the changes table", async () => {
+    const db = new Database(":memory:");
+    const app = await createDrizzleSyncServer({ db });
+
+    // The server should respond to push and pull without errors.
+    const hlc = nextHlc({ nowMs: 1, nodeId: "srv" });
+    const pushRes = await app.request("http://sync.test/push", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        userId: "u1",
+        changes: [
+          {
+            table: "notes",
+            op: "upsert",
+            row: { id: "n1", userId: "u1", data: { title: "hello" }, hlc, deleted: false },
+          },
+        ],
+      }),
+    });
+    expect(pushRes.status).toBe(200);
+    const pushBody = (await pushRes.json()) as { accepted: number };
+    expect(pushBody.accepted).toBe(1);
+
+    const pullRes = await app.request("http://sync.test/pull", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "u1", tables: ["notes"] }),
+    });
+    expect(pullRes.status).toBe(200);
+    const pullBody = (await pullRes.json()) as { changes: unknown[] };
+    expect(pullBody.changes).toHaveLength(1);
+  });
+
+  test("accepts an AsyncDatabase adapter as well", async () => {
+    const rawDb = new Database(":memory:");
+    const db = bunSqliteAdapter(rawDb);
+    const app = await createDrizzleSyncServer({ db });
+
+    const hlc = nextHlc({ nowMs: 2, nodeId: "srv" });
+    const pushRes = await app.request("http://sync.test/push", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        userId: "u2",
+        changes: [
+          {
+            table: "todos",
+            op: "upsert",
+            row: { id: "t1", userId: "u2", data: { title: "buy milk" }, hlc, deleted: false },
+          },
+        ],
+      }),
+    });
+    expect(pushRes.status).toBe(200);
+  });
+});
+
+describe("remoteChangesTable schema", () => {
+  test("exposes the correct column SQL names", () => {
+    const cols = remoteChangesTable;
+    // Verify the Drizzle schema column SQL names match what the backend creates.
+    expect(cols.checkpoint.name).toBe("checkpoint");
+    expect(cols.tableName.name).toBe("table_name");
+    expect(cols.op.name).toBe("op");
+    expect(cols.rowId.name).toBe("row_id");
+    expect(cols.userId.name).toBe("user_id");
+    expect(cols.hlc.name).toBe("hlc");
+    expect(cols.deleted.name).toBe("deleted");
+    expect(cols.payload.name).toBe("payload");
   });
 });

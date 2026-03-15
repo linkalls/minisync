@@ -6,6 +6,8 @@ export * from "./client";
 export * from "./builder";
 export * from "./memory-backend";
 export * from "./sqlite-backend";
+export * from "./sqlite-schema";
+export * from "./server-builder";
 export * from "./setup";
 export * from "./schema";
 export * from "./introspection";
