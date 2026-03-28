@@ -4,3 +4,7 @@ coverage/
 *.db
 *.sqlite
 .DS_Store
+client.db
+server.db
+client.db-journal
+server.db-journal
